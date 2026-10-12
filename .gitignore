@@ -1,0 +1,59 @@
+# Python environments, bytecode, packaging, and test caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local credentials (a future example file may be committed)
+.env
+.env.*
+!.env.example
+
+# Research data and generated artifacts; source lives in driftwood/data/
+/data/
+/artifacts/
+/reports/
+/logs/
+*.duckdb
+*.duckdb.*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+.ipynb_checkpoints/
+
+# CMake, native binaries, and compiler output
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.pyd
+*.exe
+*.pdb
+*.ilk
+
+# Editor and operating-system files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
