@@ -18,6 +18,12 @@ the milestone that introduced them.
   return, Sharpe with a zero risk-free rate, max drawdown, turnover, and
   cost. `driftwood backtest` writes the note.
 
+### Fixed
+
+- Scaling a bar onto `adj_close` no longer leaves the close a rounding
+  error outside the high or the low. The C++ fill was rejecting those
+  sessions, which stopped a real-data backtest.
+
 ## [0.4.0] - 2026-10-18
 
 ### Added
