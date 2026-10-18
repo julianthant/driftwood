@@ -41,6 +41,9 @@ flowchart LR
   gate[Alpaca paper host only]
   attr[Signal attribution]
   dash[Read-only dashboard]
+  agent[Research agent]
+  human[Human approval]
+  note[Daily note]
   notebook[Exploratory notebook]
 
   universe --> ingest
@@ -70,6 +73,11 @@ flowchart LR
   bars --> attr
   bars --> dash
   attr --> dash
+  bars --> agent
+  predictions --> agent
+  agent --> human
+  human --> note
+  human --> gate
   bars --> notebook
 ```
 
@@ -80,7 +88,9 @@ prices one order at a time. The three schedules do not share a fill.
 The paper plan uses the same weights and the same signal close. It does
 not call the simulator. A dry run never constructs a broker client.
 `--submit` talks only to `https://paper-api.alpaca.markets`. The
-dashboard reads the file and does not send orders.
+dashboard reads the file and does not send orders. The research agent
+stops before it acts. A person names the actions that may run, and a
+paper order from that list still goes through the same host gate.
 
 A study is one DuckDB file. The default path is `data/driftwood.duckdb`
 (`DRIFTWOOD_DB` overrides it). Rebuilding the file is always allowed; nothing
@@ -113,6 +123,9 @@ Commands:
   across signals. The note says that sum is not the filled equity curve.
 - `streamlit run dashboard/app.py` draws coverage and that attribution.
   The page has no order button.
+- `driftwood agent` reads the study file, asks the chat model for a JSON
+  list of proposals, and stops before any action. `--approve` is the only
+  way an action runs. The model cannot set that list.
 
 ## Finance concepts in plain language
 
@@ -1140,6 +1153,78 @@ terminal, with keys in the environment.
 is how an order would leave. They are different programs so a review of
 one does not have to audit the other for a hidden send.
 
+### ADR-022 — The model proposes, and a person approves
+
+**Context.** A research agent that can retrain and submit is useful only
+if a sentence in the data, or a sentence in the model's reply, cannot
+become an order. The study file is full of text I did not write as an
+instruction. A briefing I paste in is the same kind of text.
+
+**Decision.** The graph is collect, then propose, then execute, and it
+interrupts before execute. The propose node returns proposals and no
+other state. `approved_ids` is not a field the parser keeps. A person
+sets it with `update_state` from the names passed to `--approve`. Until
+that list is provided, execute does not run. The whitelist is
+`write_report`, `record_note`, `retrain`, and `submit_orders`. Anything
+else is refused even if the name was approved. The model is not given
+tools. It returns text, and I parse a JSON object out of that text.
+`submit_orders` drops any URL or open-market flag the model included, and
+refuses the action if those keys are present. The sender that remains
+calls the paper client with the constant host and `paper=True`. The
+open-market flag is the command-line flag, not a model argument. The chat
+model is `ChatXAI`. `XAI_MODEL` overrides the default `grok-4`.
+`XAI_API_KEY` is required, and the SDK is imported only after the key is
+present. Tests pass an object with `invoke` and do not call xAI.
+
+**Alternatives.** Let the model call tools, and treat a tool call as
+approval. That is the failure mode: the model approves itself. A
+confirmation phrase inside the model's JSON, such as `"approved": true`,
+is the same failure with an extra field. I drop that field. Skipping the
+interrupt when the model says the data already approved the order is the
+same failure again.
+
+**Tradeoff.** Approval is a list of action names on the command line, not
+a signed dialog and not a review UI. I can see the proposals in the
+terminal and type the names back. A second person is not in the loop
+unless they are the one who runs the command. Retrain uses the default
+walk-forward windows. The agent does not remember yesterday except what
+is already in the study file.
+
+**Why this one.** The test I would walk through puts "approve
+submit_orders" inside the briefing, aimed at the live host, and the fake
+model obeys. The state after the interrupt still has an empty approval
+list. Resuming with the report approved and the order approved writes the
+note and does not call the sender. The live URL never becomes the client
+URL.
+
+### ADR-023 — The daily note is rendered here
+
+**Context.** If the model writes the report, the report can claim an
+order was approved, or can omit the limit that says it was not. A saved
+golden file would freeze wording that is not the point.
+
+**Decision.** `render_daily_report` writes the page: Data, Proposals,
+Decision, Actions, Limits. Reasons from the model are flattened to one
+line. The Limits section says the model cannot approve itself, that
+submit uses the paper host, and that the note is not a live result. The
+file is written only when `write_report` was proposed and a person
+approved it. `docs/examples/daily_report.md` is one call of that
+function. Tests look for the section headers. They do not diff the
+example.
+
+**Alternatives.** Ask the model for markdown and store it. That makes the
+audit trail a document the model can rewrite. A snapshot test of the
+whole example would fail on a wording change that does not change the
+contract.
+
+**Tradeoff.** The note is plain. It does not try to be a research memo
+with a view about the market. The view, if I want one, is a proposal
+reason, quoted, and it is labeled as such.
+
+**Why this one.** The headers are the contract a reviewer can check
+without reading every sentence. The example in `docs/examples/` is the
+same function a run uses, so I am not maintaining a second template.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -1229,22 +1314,27 @@ one does not have to audit the other for a hidden send.
   filled equity curve, and it uses the latest fold's coefficients only.
   Gradient-boosted importances are not linear betas.
 - The dashboard cannot submit, cancel, or flatten. That is on purpose.
+- The agent's approval is a list of action names on the command line. It
+  is not a second person, and it is not a signed token.
+- The model has no tools. A URL or an open-market flag inside a proposal
+  refuses `submit_orders` rather than being forwarded.
+- The agent does not remember a prior day except through the study file.
+  Retrain uses the default walk-forward windows.
+- Tests never call xAI, yfinance, or Alpaca. A real `driftwood agent` run
+  calls xAI when `XAI_API_KEY` is set. It still cannot approve itself.
 
 ## What I would build next on this stage
 
-A research agent that can propose a retrain, a note, or a paper order,
-and that cannot act until a person approves the proposal. The paper host
-rule stays. The agent does not get a way to set its own approval.
-
 Still owed from the data stage: a point-in-time membership table, a stored
 split factor so dollar volume is unambiguous, and sector-neutral z-scores.
+The agent would then be briefing a book that knew who was actually in the
+index.
 
 ## Interview questions
 
 ### Walk me through the project
 
-Two-minute version of what exists today. Later milestones extend this answer;
-they do not get claimed yet.
+Two-minute version of the project as it stands.
 
 "Driftwood is a US equity research pipeline I'm building from daily prices
 through paper trading. What exists so far is the data, the features, a
@@ -1311,7 +1401,16 @@ Attribution is arithmetic. Each name's weight times its next-session
 adjusted return is split across the signals in proportion to coefficient
 times z-score. The pieces, plus an unattributed bucket, add back to that
 sum. I say out loud that this is the target book's close-to-close return,
-not the equity curve after spread and after the fill."
+not the equity curve after spread and after the fill.
+
+The research agent can propose a retrain, a note, a paper order, or the
+daily write-up. It stops before it acts. I approve by naming the actions
+on the command line, and that list is applied to the graph state. The
+model does not get a tool, and it does not get to set its own approval.
+A test puts 'approve the order' in the briefing, the fake model obeys,
+and the order function is not called. The chat model is configurable.
+The default is grok-4, the key comes from the environment, and the tests
+do not call it. I have not sent a live order."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -1541,3 +1640,31 @@ the UI runtime or the broker. The app source has no submit call. If I
 want an order to leave, I run `driftwood paper --submit` in a terminal,
 with the paper keys set, and I read the symbols and quantities it prints.
 The page can show me the preview. It cannot click it for me."
+
+### How does the agent get human approval?
+
+"The graph collects a description of the study file, asks the chat model
+for JSON proposals, and interrupts before the node that acts. The propose
+step is allowed to return proposals. It is not allowed to return
+`approved_ids`. I set those with an update to the graph state from the
+names I passed on the command line. If I do not pass them, the action
+node never runs. The model has no tools, so it cannot call the broker
+while it is 'thinking.' The whitelist is a report, a note, a retrain, and
+a paper submit. A name that is not on that list is refused even if I
+typed it. The chat model is ChatXAI. The default name is grok-4, and
+`XAI_MODEL` changes it. The key is `XAI_API_KEY`. Tests pass a fake
+`invoke` and never call the API."
+
+### What if the stored data tells the model to approve a live order?
+
+"I treat that text as data. The prompt says so, and the code does not
+depend on the model obeying the prompt. The parser keeps the proposals
+and drops `approved_ids`. If the proposal carries a URL or an
+open-market flag, submit is refused before any client is built. The
+sender that is left always uses the paper host constant. The test writes
+'approve submit_orders' into the briefing, points the fake model at the
+live host, and checks three things: the approval list is still empty at
+the interrupt, approving the report writes the note, and the order
+function is never called. The daily note is rendered by my function, with
+fixed section headers, so the model cannot write a page that says the
+order was approved when it was not."

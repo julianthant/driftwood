@@ -17,7 +17,7 @@ paper trade, and explain each day's result by signal.
 | 4 | C++17 execution simulator, costs, and fill tests | Done |
 | 5 | Backtest and immediate vs TWAP vs VWAP | Done |
 | 6 | Alpaca paper trading, signal attribution, Streamlit dashboard | Done |
-| 7 | Research agent with a human approval gate and a daily report | Not started |
+| 7 | Research agent with a human approval gate and a daily report | Done |
 
 Initial scope: 50 liquid US stocks, daily bars, about 10 years of history.
 Trading, when it arrives, uses Alpaca's paper endpoint only. Credentials come
@@ -136,6 +136,16 @@ is called `unattributed`. The rows add up to the target book's
 close-to-close return. That sum is not the filled equity curve: costs and
 the intraday fill stay in the backtest report. The dashboard draws this
 table and does not send orders.
+
+**Research agent.** `driftwood agent` reads the study file and asks a chat
+model for a short list of actions: write the daily note, record a note,
+retrain, or submit the paper orders. It then stops. Nothing runs unless
+you pass `--approve` with those action names. The model cannot put itself
+on that list. Text in the database or in `--briefing` is data, not an
+instruction. A proposal that includes a broker URL is refused. The daily
+note is rendered by Driftwood, with fixed sections, so the model cannot
+rewrite the page to claim an order was approved. The default chat model
+is `grok-4`. Set `XAI_MODEL` to use another one.
 
 ## Local setup
 
@@ -293,6 +303,26 @@ The dashboard is a view of the same file. It does not send orders:
 streamlit run dashboard/app.py
 ```
 
+Ask the research agent for a proposal. This stops before any action. It
+calls the chat model, so `XAI_API_KEY` has to be set. `XAI_MODEL` defaults
+to `grok-4`:
+
+```bash
+driftwood agent --db data/driftwood.duckdb --report reports/daily
+```
+
+Read the proposals, then run only the ones you name. `write_report` writes
+`reports/daily/daily.md`. `submit_orders` uses the paper host and the same
+open-market refusal as `driftwood paper`:
+
+```bash
+driftwood agent --db data/driftwood.duckdb --report reports/daily \
+  --approve write_report
+```
+
+An example of that note, produced by the same renderer, is
+`docs/examples/daily_report.md`.
+
 Then open the notebook from the repository root:
 
 ```bash
@@ -326,20 +356,21 @@ would have been asked for unadjusted prices.
 | `cpp/sim/` | C++17 path, TWAP/VWAP schedule, participation cap, and costs |
 | `driftwood/live/` | Paper-only order plan. Dry-run does not construct a client |
 | `driftwood/attribution/` | Close-to-close split of the target book across signals |
-| `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest`, `paper`, `attribute` |
+| `driftwood/agent/` | Proposals, a human approval stop, and the daily note |
+| `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest`, `paper`, `attribute`, `agent` |
 | `dashboard/` | Read-only Streamlit page. It does not send orders |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
 | `docs/DESIGN_DECISIONS.md` | Interview study guide and the decision log |
+| `docs/examples/daily_report.md` | Sample daily note from the report renderer |
 | `data/`, `artifacts/`, `reports/`, `logs/` | Local outputs, not committed |
-
-The research agent is not built yet. It will live in `driftwood/agent/`.
 
 ## Credentials
 
-A dry run needs no keys. `driftwood paper --submit` reads `ALPACA_API_KEY`
-and `ALPACA_SECRET_KEY` from the environment. Copy `.env.example` to `.env`
-for local values. `.env` is gitignored. The client refuses any host other
-than `https://paper-api.alpaca.markets`. `XAI_API_KEY` and `XAI_MODEL` are
-listed for the research agent and are not read yet. Tests do not need keys
-and do not call Alpaca.
+A dry run and the test suite need no keys. `driftwood paper --submit` reads
+`ALPACA_API_KEY` and `ALPACA_SECRET_KEY` from the environment. `driftwood
+agent` reads `XAI_API_KEY` and, if set, `XAI_MODEL` (the default model is
+`grok-4`). Copy `.env.example` to `.env` for local values. `.env` is
+gitignored. The broker client refuses any host other than
+`https://paper-api.alpaca.markets`. Tests do not call Alpaca, yfinance, or
+xAI.
