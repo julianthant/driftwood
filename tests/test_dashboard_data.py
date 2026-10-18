@@ -99,7 +99,7 @@ def test_dashboard_queries_leave_database_unchanged(study_db):
     )
     saved = data.load_backtest(str(path), "ridge")
     assert_frame_equal(
-        saved.summary.drop(columns="model").reset_index(drop=True),
+        saved.summary.loc[:, result.summary.columns].reset_index(drop=True),
         result.summary.sort_values("algo").reset_index(drop=True),
     )
     for algo, frame in saved.daily.groupby("algo"):

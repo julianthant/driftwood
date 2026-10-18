@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from dashboard.views import backtest_series, coverage_table, ic_series, missing_by_month
+from dashboard.views import (
+    backtest_series,
+    coverage_table,
+    execution_summary,
+    ic_series,
+    missing_by_month,
+    model_order,
+)
 from driftwood.attribution.study import Attribution, attribute_store
 from driftwood.backtest.persist import input_signature
 from driftwood.data.store import MarketStore
@@ -34,6 +41,7 @@ class ModelQuality:
     coefficients: pd.DataFrame
     label: str
     hac_lags: int
+    label_known: bool
 
 
 @dataclass
@@ -81,6 +89,10 @@ def load_study(path: str) -> Study:
                 .df()["model"]
                 .astype(str)
             )
+            saved = ()
+            if _has_table(store, "backtest_runs"):
+                saved = tuple(store.execute("SELECT model FROM backtest_runs").df()["model"])
+            models = model_order(models, saved)
         sources = tuple(
             store.execute("SELECT DISTINCT source FROM bars ORDER BY source")
             .df()["source"]
@@ -105,12 +117,14 @@ def load_quality(path: str, model: str) -> ModelQuality:
             [model],
         ).df()
         label = "unknown (legacy predictions)"
+        label_known = False
         if _has_table(store, "model_metadata"):
             row = store.execute(
                 "SELECT label_column FROM model_metadata WHERE model = ?", [model]
             ).fetchone()
             if row:
                 label = str(row[0])
+                label_known = True
         coefficients = (
             read_coefficients(store, model)
             if _has_table(store, "coefficients")
@@ -119,7 +133,12 @@ def load_quality(path: str, model: str) -> ModelQuality:
     lags = 1 if label == "fwd_ret_1d" else 5
     daily = information_coefficient(predictions, label="label")
     return ModelQuality(
-        ic_series(daily), summarize_ic(daily, hac_lags=lags), coefficients, label, lags
+        ic_series(daily),
+        summarize_ic(daily, hac_lags=lags),
+        coefficients,
+        label,
+        lags,
+        label_known,
     )
 
 
@@ -142,7 +161,12 @@ def load_backtest(path: str, model: str) -> Backtest:
         summary = store.execute(
             "SELECT * FROM backtest_summary WHERE model = ? ORDER BY algo", [model]
         ).df()
-    return Backtest(backtest_series(daily), summary, json.loads(run[1]), pd.Timestamp(run[2]))
+    return Backtest(
+        backtest_series(daily),
+        execution_summary(summary, daily),
+        json.loads(run[1]),
+        pd.Timestamp(run[2]),
+    )
 
 
 def load_attribution(path: str, model: str) -> Attribution:

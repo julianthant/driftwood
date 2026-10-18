@@ -31,7 +31,11 @@ def coverage_table(bars: pd.DataFrame) -> pd.DataFrame:
 def attribution_table(contributions: pd.DataFrame) -> pd.DataFrame:
     """Signal contributions plus a total row. The total is the book's return."""
 
-    frame = contributions.loc[:, ["signal", "contribution"]].copy()
+    frame = (
+        contributions.loc[:, ["signal", "contribution"]]
+        .sort_values("contribution", kind="stable")
+        .copy()
+    )
     total = float(frame["contribution"].sum()) if not frame.empty else 0.0
     extra = pd.DataFrame([{"signal": "total", "contribution": total}])
     return pd.concat([frame, extra], ignore_index=True)
@@ -72,3 +76,28 @@ def missing_by_month(dates: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
     counts = frame.groupby(["symbol", "month"]).size().unstack("month")
     counts = counts.reindex(index=symbols, columns=sessions.index).fillna(0)
     return 1.0 - counts.div(sessions, axis="columns")
+
+
+def model_order(models: tuple[str, ...], backtested: tuple[str, ...]) -> tuple[str, ...]:
+    """Start on an existing backtest, preferring ridge within each availability group."""
+    saved = set(backtested)
+    return tuple(sorted(models, key=lambda model: (model not in saved, model != "ridge", model)))
+
+
+def execution_summary(summary: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    """Cost in basis points uses actual raw traded notional, never starting capital."""
+    notional = daily.groupby("algo")["traded_notional"].sum().rename("total_traded_notional")
+    frame = summary.merge(notional, on="algo", how="left", validate="one_to_one")
+    denominator = frame["total_traded_notional"].where(frame["total_traded_notional"] > 0)
+    frame["cost_bps"] = frame["total_cost"] / denominator * 10_000
+    return frame
+
+
+def relative_costs(daily: pd.DataFrame) -> pd.DataFrame:
+    """Match each schedule's cumulative fill cost to Immediate on the same session."""
+    baseline = daily.loc[daily["algo"] == "immediate", ["date", "cumulative_cost"]]
+    baseline = baseline.rename(columns={"cumulative_cost": "immediate_cost"})
+    others = daily.loc[daily["algo"] != "immediate", ["algo", "date", "cumulative_cost"]]
+    frame = others.merge(baseline, on="date", how="inner", validate="many_to_one")
+    frame["cost_difference"] = frame["cumulative_cost"] - frame["immediate_cost"]
+    return frame
