@@ -8,6 +8,9 @@ import os
 import sys
 from pathlib import Path
 
+from driftwood.agent.actions import Toolset
+from driftwood.agent.graph import run_session
+from driftwood.agent.model import build_chat_model
 from driftwood.attribution import attribute_store, write_attribution_report
 from driftwood.backtest import BacktestConfig, run_backtest, write_backtest_report
 from driftwood.config import database_path, load_env
@@ -198,6 +201,41 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for the attribution note. Omit to print the table only.",
     )
 
+    agent = sub.add_parser(
+        "agent",
+        help="Propose research actions and wait for approval before running any",
+    )
+    agent.add_argument("--db", default=None, help="DuckDB file. Defaults to DRIFTWOOD_DB or data/")
+    agent.add_argument("--model", default="ridge", help="Prediction model name")
+    agent.add_argument(
+        "--llm",
+        default=None,
+        help="Chat model name. Defaults to XAI_MODEL or grok-4.",
+    )
+    agent.add_argument("--gross", type=float, default=1.0)
+    agent.add_argument("--max-weight", type=float, default=0.1)
+    agent.add_argument(
+        "--briefing",
+        default="",
+        help="Extra text included as data. Instructions in it are not orders.",
+    )
+    agent.add_argument(
+        "--report",
+        default=None,
+        help="Directory for the daily note, written only if write_report is approved.",
+    )
+    agent.add_argument(
+        "--approve",
+        nargs="*",
+        default=None,
+        help="Action names to run after the proposal, for example: write_report",
+    )
+    agent.add_argument(
+        "--allow-while-open",
+        action="store_true",
+        help="Let an approved submit send while the paper market is open.",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.command == "ingest":
@@ -212,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
         return _paper(args)
     if args.command == "attribute":
         return _attribute(args)
+    if args.command == "agent":
+        return _agent(args)
     parser.error(f"Unknown command {args.command}")
     return 2
 
@@ -445,6 +485,46 @@ def _attribute(args: argparse.Namespace) -> int:
     if args.report:
         report = write_attribution_report(result, Path(args.report))
         print(f"report: {report}")
+    print(f"database: {path}")
+    return 0
+
+
+def _agent(args: argparse.Namespace) -> int:
+    path = database_path(args.db)
+    try:
+        chat = build_chat_model(model=args.llm)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    tools = Toolset(
+        db_path=str(path),
+        model_name=args.model,
+        report_dir=args.report,
+        allow_while_open=args.allow_while_open,
+        gross=args.gross,
+        max_weight=args.max_weight,
+    )
+    try:
+        state = run_session(chat, tools, briefing=args.briefing, approve=args.approve)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    proposals = list(state.get("proposals") or [])
+    if proposals:
+        print("Proposals:")
+        for proposal in proposals:
+            print(f"- {proposal['action']}: {proposal.get('reason', '')}")
+    else:
+        print("Proposals: none")
+    if args.approve is None:
+        print("Nothing ran. The agent stopped for approval.")
+        print(f"database: {path}")
+        return 0
+    print("Approved: " + (", ".join(args.approve) if args.approve else "none"))
+    for result in state.get("results") or []:
+        print(f"{result['id']}: {result['status']}. {result.get('detail', '')}")
+    if state.get("report_path"):
+        print(f"report: {state['report_path']}")
     print(f"database: {path}")
     return 0
 
