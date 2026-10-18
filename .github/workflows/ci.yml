@@ -31,13 +31,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake
 
-      - name: Install CMake on macOS when the image does not have it
+      - name: Install CMake and OpenMP on macOS
         if: runner.os == 'macOS'
         shell: bash
         run: |
           if ! command -v cmake >/dev/null 2>&1; then
             brew install cmake
           fi
+          brew install libomp
           cmake --version
 
       - name: Lint and install
