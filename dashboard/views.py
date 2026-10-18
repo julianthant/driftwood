@@ -6,6 +6,8 @@ draws these frames is not allowed to send an order.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 
@@ -91,6 +93,17 @@ def execution_summary(summary: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFram
     denominator = frame["total_traded_notional"].where(frame["total_traded_notional"] > 0)
     frame["cost_bps"] = frame["total_cost"] / denominator * 10_000
     return frame
+
+
+def shared_cost_bps(summary: pd.DataFrame) -> float | None:
+    """Collapse equal realized rates, allowing only floating-point summation noise."""
+    rates = summary["cost_bps"].tolist()
+    if not rates or not all(math.isfinite(rate) for rate in rates):
+        return None
+    first = float(rates[0])
+    if all(math.isclose(rate, first, rel_tol=0, abs_tol=1e-6) for rate in rates):
+        return first
+    return None
 
 
 def relative_costs(daily: pd.DataFrame) -> pd.DataFrame:

@@ -38,6 +38,21 @@ def test_cost_bps_uses_actual_traded_notional_and_handles_flat_books():
     assert np.isnan(result.loc["vwap", "cost_bps"])
 
 
+@pytest.mark.parametrize(
+    ("rates", "expected"),
+    [
+        ([1.0, 1.0 + 1e-10, 1.0 - 1e-10], 1.0),
+        ([0.0, 0.0, 0.0], 0.0),
+        ([1.0, 1.001, 1.0], None),
+        ([1.0, np.nan, 1.0], None),
+        ([1.0, np.inf, 1.0], None),
+        ([], None),
+    ],
+)
+def test_shared_cost_rate_preserves_real_differences_and_undefined_rates(rates, expected):
+    assert views.shared_cost_bps(pd.DataFrame({"cost_bps": rates})) == expected
+
+
 def test_label_metadata_distinguishes_legacy_predictions(tmp_path):
     # The missing-model case exercises the schema without requiring training.
     path = tmp_path / "metadata.duckdb"
