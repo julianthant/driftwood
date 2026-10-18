@@ -36,6 +36,11 @@ flowchart LR
   sim[C++ fill simulator]
   backtest[Next-session backtest]
   compare[Immediate vs TWAP vs VWAP]
+  coef[(coefficients table)]
+  paper[Paper order plan]
+  gate[Alpaca paper host only]
+  attr[Signal attribution]
+  dash[Read-only dashboard]
   notebook[Exploratory notebook]
 
   universe --> ingest
@@ -49,12 +54,22 @@ flowchart LR
   features --> train
   labels --> train
   train --> predictions
+  train --> coef
   predictions --> report
   predictions --> backtest
   bars --> backtest
   features --> backtest
   backtest --> sim
   backtest --> compare
+  predictions --> paper
+  bars --> paper
+  paper --> gate
+  predictions --> attr
+  features --> attr
+  coef --> attr
+  bars --> attr
+  bars --> dash
+  attr --> dash
   bars --> notebook
 ```
 
@@ -62,11 +77,16 @@ The backtest reads the prediction column, the adjusted bar, and `vol_21`
 from the signal date. It does not read the label. The simulator still
 prices one order at a time. The three schedules do not share a fill.
 
+The paper plan uses the same weights and the same signal close. It does
+not call the simulator. A dry run never constructs a broker client.
+`--submit` talks only to `https://paper-api.alpaca.markets`. The
+dashboard reads the file and does not send orders.
+
 A study is one DuckDB file. The default path is `data/driftwood.duckdb`
 (`DRIFTWOOD_DB` overrides it). Rebuilding the file is always allowed; nothing
 downstream is allowed to assume a hidden cache of unadjusted prices.
 
-Commands that write the file:
+Commands:
 
 - `driftwood ingest --start ... --end ...` calls yfinance.
 - `driftwood ingest --synthetic` writes a deterministic random walk, with an
@@ -84,6 +104,15 @@ Commands that write the file:
 - `driftwood backtest` reads bars, predictions, and `vol_21`, and writes a
   comparison of the three schedules. It trades `prediction`. The label
   stored beside it is not an input.
+- `driftwood train` also writes the fold coefficients. Retraining one
+  model replaces that model's rows and leaves the others.
+- `driftwood paper` prints the next-session share deltas. It does not
+  send them unless `--submit` is set, and then only to the Alpaca paper
+  host. A dry run does not need API keys.
+- `driftwood attribute` splits the last scored close-to-close return
+  across signals. The note says that sum is not the filled equity curve.
+- `streamlit run dashboard/app.py` draws coverage and that attribution.
+  The page has no order button.
 
 ## Finance concepts in plain language
 
@@ -1009,9 +1038,107 @@ simulator.
 **Why this one.** The table answers "what changed when the schedule
 changed?" and refuses to answer "should I trade this?" The second question
 needs a portfolio that survived costs out of sample, and a sentence about
-survivorship, and I am not there yet. Paper trading is the next place that
-question gets asked, against a broker's paper endpoint rather than against
-this file.
+survivorship. The paper command asks it against Alpaca's paper host, and
+the default answer is still a preview, not an order.
+
+### ADR-019 — The paper host is a constant, and dry-run is the default
+
+**Context.** A paper account is still a broker. One wrong base URL, or a
+flag that defaults to "send," turns a research command into an order. The
+signal is known at the close, so an order sent while the market is open
+would fill the session that produced the score.
+
+**Decision.** The only accepted URL is exactly
+`https://paper-api.alpaca.markets`. Anything else, including the live host,
+a lookalike domain, and HTTP, raises before the SDK client is constructed.
+The client is then built with `paper=True` and that constant. The caller's
+string is never forwarded. `driftwood paper` prints orders and stops.
+`--submit` is what sends, and it requires `ALPACA_API_KEY` and
+`ALPACA_SECRET_KEY` from the environment. On submit the command reads the
+paper clock and refuses while the market is open, unless
+`--allow-while-open` is passed. It also re-reads account equity and
+positions and plans again, so the flat preview is not the order that goes
+out. Share counts use the signal date's adjusted close from the local
+file, not a live quote. Client order ids look like
+`dw-YYYYMMDD-symbol-side` and are cut at 48 characters.
+
+**Alternatives.** Trust `ALPACA_BASE_URL` and pass it through. That makes
+the safety check a comment. A default of submit, with dry-run as the
+option, will eventually be run by a script that forgot the flag. Sizing
+off a live quote would mix a price the signal never saw into the share
+count.
+
+**Tradeoff.** DAY market orders are not the C++ TWAP or VWAP schedule.
+The broker fills them. I would rather keep one safety rule in this
+process than pretend the paper ticket is the research fill. Shorts and
+fractional shares can be rejected by the account. The planner still emits
+the delta. Keys are never printed.
+
+**Why this one.** The mistake I am unwilling to make is sending an order
+to the live host, or sending today's order against today's open. Both
+are refused by construction. A test replaces the client class and checks
+that a bad URL never constructs it, that a dry run never calls the
+factory, and that an open clock sends nothing.
+
+### ADR-020 — Attribution is an accounting identity
+
+**Context.** After a day, I want to say which signal the return belonged
+to. A regression of return on features will not add up, and the weight
+cap is not linear in the scores, so the book's weights are not the betas.
+
+**Decision.** Take the target book's close-to-close return, name by name:
+weight times the next session's adjusted return. Split each name's piece
+across signals in proportion to that name's exposures. An exposure is the
+latest fold's coefficient times the signal-date z-score. If the exposures
+sum to zero and the weight is not, the piece goes to `unattributed`. The
+rows, including that bucket, sum to `sum(w * r)` within `1e-10`. The note
+says this is the target book, not the filled equity curve. Costs and the
+intraday fill stay in the backtest report. If the coefficient table is
+missing, every z-score is used with a beta of 1 and the command says so.
+`driftwood train` writes the coefficients and replaces them per model,
+the same way it replaces predictions.
+
+**Alternatives.** A cross-sectional regression of the day's returns on
+the z-scores. That is a new estimate, and the residuals are not a bucket
+I can defend as "the part the cap threw away." Attributing the backtest's
+equity-curve return would mix spread and the invented path into a signal
+story. I keep those in the schedule table.
+
+**Tradeoff.** The split uses the latest fold only, not a blend of every
+fold that ever forecast this name. Tree importances are stored for the
+gradient-boosted check, and they are not linear betas. I would quote the
+ridge coefficients. A name with no next bar is left out of that day's
+weights rather than given a made-up return.
+
+**Why this one.** The test I want is arithmetic. Random weights, returns,
+and exposures, including a name with weight and zero exposure, have to
+add back to the book. A hand case where one signal is the whole exposure
+gives that signal the whole contribution and the other signal nothing.
+
+### ADR-021 — The dashboard does not trade
+
+**Context.** A page that can see the book will grow a button. The button
+will get clicked.
+
+**Decision.** `dashboard/views.py` is dataframes: coverage, the
+attribution table with a total row, and an order preview. The Streamlit
+script imports its runtime inside `main`. The page reads the study file
+and draws those frames. It does not import the broker SDK, and the source
+does not contain a submit call. Tests import the views with the UI
+runtime absent from `sys.modules`, and they scan the app source.
+
+**Alternatives.** A trade button that calls the paper command. That puts
+the dangerous path behind a click, which is how a preview becomes an
+order. Generating the page from a notebook would be easier to hide a
+side effect in. The views are importable without starting the server.
+
+**Tradeoff.** The page cannot flatten a book or cancel an order. That is
+a separate, deliberate command, `driftwood paper --submit`, in a
+terminal, with keys in the environment.
+
+**Why this one.** The dashboard is how I look at a day. The paper command
+is how an order would leave. They are different programs so a review of
+one does not have to audit the other for a hidden send.
 
 ## Known limitations
 
@@ -1042,10 +1169,10 @@ this file.
   it is entirely missing and uses it once it exists.
 - The headline model is linear. The tree is a check with small, untuned
   settings. Alpha is fixed. It is not chosen by looking at the test IC.
-- There is no portfolio. The information coefficient is not a return and
-  it is not a Sharpe ratio. A forecast can rank names well and still lose
-  money after spread and impact. The fill model can price that loss for
-  one order. It does not yet do it for a book.
+- The information coefficient is not a return and it is not a Sharpe
+  ratio. A forecast can rank names well and still lose money after spread
+  and impact. The backtest is where that loss is priced. The IC report
+  does not become a strategy because a book now exists.
 - The plain IC t-stat treats days as independent. Overlapping labels make
   it optimistic. The report's Newey-West number is the one to quote for the
   five-day label, and even that is a diagnostic.
@@ -1091,14 +1218,23 @@ this file.
   all three would have been in the market together is not modeled.
 - Sharpe in the report annualizes daily strategy returns with a zero
   risk-free rate. On a short window it is a description, not evidence.
-- No broker connection or dashboard exists yet.
+- Paper orders are DAY market orders. They are not the C++ immediate,
+  TWAP, or VWAP schedule. The broker fills them, and this file does not
+  see the fill.
+- The paper planner will emit a short and a fractional share. The account
+  can reject either. That rejection is not modeled.
+- Sizing uses the signal date's adjusted close from the local database.
+  It does not use a live quote, and it does not know a halt.
+- Attribution is the target book's close-to-close return. It is not the
+  filled equity curve, and it uses the latest fold's coefficients only.
+  Gradient-boosted importances are not linear betas.
+- The dashboard cannot submit, cancel, or flatten. That is on purpose.
 
 ## What I would build next on this stage
 
-A paper-trading loop against Alpaca's paper endpoint only, and an
-attribution that splits a day's portfolio return across the signals that
-were on. The backtest's clock stays: a score cannot trade the session that
-produced it.
+A research agent that can propose a retrain, a note, or a paper order,
+and that cannot act until a person approves the proposal. The paper host
+rule stays. The agent does not get a way to set its own approval.
 
 Still owed from the data stage: a point-in-time membership table, a stored
 split factor so dollar volume is unambiguous, and sector-neutral z-scores.
@@ -1112,8 +1248,10 @@ they do not get claimed yet.
 
 "Driftwood is a US equity research pipeline I'm building from daily prices
 through paper trading. What exists so far is the data, the features, a
-walk-forward return model, a C++ fill, and a next-session backtest. I have
-not sent an order to a broker, paper or otherwise.
+walk-forward return model, a C++ fill, a next-session backtest, a paper
+order plan, and a per-signal attribution. I have not sent an order to a
+live broker. The paper command's default is a dry run, and the only host
+it will construct a client for is the Alpaca paper API.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
 survivorship bias and I say that before any result. I download daily bars
@@ -1161,7 +1299,19 @@ return, a zero-risk-free Sharpe, drawdown, turnover, and cost. I would
 not read you the Sharpe off a short window and call it a strategy. The
 test I would point at is the jump: the bar opens at the old price and
 closes at twice that, the score is on that close, and the equity does
-not move until the next session."
+not move until the next session.
+
+The paper plan is that same clock. It sizes with the signal close, and
+the order is for the next session. Sending it while the market is open
+is refused, because a DAY order would fill today. Submit re-reads the
+paper account so a flat preview cannot double a position that is already
+on. The dashboard draws the book and does not send.
+
+Attribution is arithmetic. Each name's weight times its next-session
+adjusted return is split across the signals in proportion to coefficient
+times z-score. The pieces, plus an unattributed bucket, add back to that
+sum. I say out loud that this is the target book's close-to-close return,
+not the equity curve after spread and after the fill."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -1356,3 +1506,38 @@ note says it is not a live result. A flat book with zero costs ends flat
 for all three. A positive spread loses money. A wide bar makes immediate
 and TWAP pay different prices. Those are the tests. The Sharpe on a short
 window is a description of that window."
+
+### Why is the broker call hard to point at the live host?
+
+"The paper URL is a constant in the source, `https://paper-api.alpaca.markets`.
+The check runs before the client is constructed. A different host, a
+lookalike domain, and plain HTTP all raise. The client is then created
+with `paper=True` and that same constant. I do not forward the string I
+was given. The command defaults to printing orders. `--submit` is what
+sends, it reads keys from the environment, and it refuses to send while
+the paper market is open unless I pass a second flag. A test stubs the
+client class and checks that a bad URL never constructs it. Another test
+makes the factory raise and runs the dry-run command. I have not pointed
+this at a live account, and the code path that would do it does not exist."
+
+### What do you mean by attribution?
+
+"I mean an identity, not a new regression. The target book has a weight
+per name. The next session has an adjusted return. Weight times return is
+that name's contribution to the close-to-close result. I split it across
+signals in proportion to exposure, and exposure is the latest ridge
+coefficient times that day's z-score. If a name has a weight and the
+exposures sum to zero, the contribution sits in an unattributed bucket.
+Add the rows and you get the book back, to a tolerance of 1e-10. I do not
+call that the backtest's equity curve. The equity curve paid the spread
+and filled on the invented path. Those costs stay in the schedule report.
+If I never stored coefficients, I use a beta of one and I print that."
+
+### Why doesn't the dashboard have a trade button?
+
+"Because a page I open to look at a day should not be able to send an
+order. The views are plain dataframes, and importing them does not import
+the UI runtime or the broker. The app source has no submit call. If I
+want an order to leave, I run `driftwood paper --submit` in a terminal,
+with the paper keys set, and I read the symbols and quantities it prints.
+The page can show me the preview. It cannot click it for me."
