@@ -5,6 +5,10 @@ the adjusted close. Scaling the raw bar by ``adj_close / close`` puts the
 whole session on that series. It is the usual approximation when the vendor
 did not supply an adjusted high and low. A split that halved the raw close
 and left ``adj_close`` alone is undone by the factor.
+
+Assigning ``close`` to ``adj_close`` exactly can leave it one rounding error
+outside the scaled high or low. High and low are then expanded so the bar
+still contains the open and the close. The fill rejects a bar that does not.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ def adjusted_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
     """Return a copy with open, high, low, and close on the adjusted scale.
 
     ``volume`` is left as stored. ``adj_close`` is copied into ``close``.
+    High and low are expanded if that copy sits a rounding error outside them.
     """
 
     required = ["open", "high", "low", "close", "adj_close"]
@@ -34,4 +39,13 @@ def adjusted_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ("open", "high", "low"):
         out[column] = out[column].astype(float) * factor
     out["close"] = adj
+    # close * (adj / close) is not always the same float as adj. When the
+    # raw close sat on the high or the low, the adjusted close can fall
+    # just outside the scaled bar. The simulator treats that as a bad print.
+    high = out["high"].to_numpy(dtype=float)
+    low = out["low"].to_numpy(dtype=float)
+    open_ = out["open"].to_numpy(dtype=float)
+    close_ = out["close"].to_numpy(dtype=float)
+    out["high"] = np.maximum(high, np.maximum(open_, close_))
+    out["low"] = np.minimum(low, np.minimum(open_, close_))
     return out
