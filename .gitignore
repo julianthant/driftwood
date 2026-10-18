@@ -36,6 +36,7 @@ htmlcov/
 
 # CMake, native binaries, and compiler output
 cmake-build-*/
+_skbuild/
 CMakeFiles/
 CMakeCache.txt
 *.obj

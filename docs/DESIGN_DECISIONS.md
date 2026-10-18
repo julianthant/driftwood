@@ -33,6 +33,7 @@ flowchart LR
   train[Walk-forward fit]
   predictions[(predictions table)]
   report[IC report]
+  sim[C++ fill simulator]
   notebook[Exploratory notebook]
 
   universe --> ingest
@@ -47,8 +48,13 @@ flowchart LR
   labels --> train
   train --> predictions
   predictions --> report
+  bars --> sim
   bars --> notebook
 ```
+
+The simulator is not wired to the predictions yet. It prices one order
+against one bar. A backtest that would connect them is the next stage, and
+it is not in this diagram because it does not exist.
 
 A study is one DuckDB file. The default path is `data/driftwood.duckdb`
 (`DRIFTWOOD_DB` overrides it). Rebuilding the file is always allowed; nothing
@@ -66,6 +72,9 @@ Commands that write the file:
   training window, and writes out-of-sample predictions. `--report` writes
   the information-coefficient note beside the file. The predictions table
   keeps one row set per model name.
+- `driftwood.execution.execute_order` prices one order by calling
+  `driftwood._sim`. Installing the package builds that module. There is no
+  separate compile command.
 
 ## Finance concepts in plain language
 
@@ -196,6 +205,58 @@ days with the next one, so the plain t-stat is too flattering. The report
 also prints a Newey-West (HAC) t-stat with lags equal to the horizon. That
 is the number to quote when the label is longer than one day. It is still a
 diagnostic, not a promise.
+
+### TWAP, VWAP, and the path inside a daily bar
+
+A daily bar does not say what happened at 10:30. Any sentence about an
+intraday fill is a model. Driftwood's model has three pieces, and they are
+deliberately simple enough to test.
+
+The path. An up day, where the close is at least the open, prints in the
+order open, low, high, close. A down day prints open, high, low, close.
+Those four prices are anchors at the start, one third, two thirds, and the
+end of the session. Between them the price is a straight line. Bin `i` of
+`n` (eight bins by default) is the price at the middle of that slice, at
+time `(i + 0.5) / n`. Every anchor is inside the high and the low, and a
+straight line between inside points stays inside. The tests check that,
+including a flat bar where every price is the same print.
+
+The schedule. Immediate puts the whole order in the first bin and prices
+that bin at the open, which is not the same number as the first path
+midpoint. TWAP targets an equal number of shares in every bin. VWAP targets
+shares in proportion to a U-shaped volume guess: the open and the close are
+heavier than the middle, and the weights sum to one. That U is not this
+stock's real volume curve. A daily bar cannot tell us that.
+
+The cap. A bin will not fill more than `participation_limit` (default 10
+percent) of that bin's volume. Shares that do not fit carry into the next
+bin. Shares still left at the close are unfilled. An immediate order that
+is small relative to the opening volume therefore prints at the open. A
+large one starts at the open and then walks the path. Calling the second
+case a pure market-on-open would be a lie, so the carry is part of the
+definition.
+
+### What a fill costs
+
+The raw price is the path (or the open, for the first bin of an immediate
+order). The fill price moves against the trader. A buy pays more. A sell
+receives less. The fraction is half the spread, in basis points, plus
+`impact_coef * sigma * sqrt(participation)`. Participation is the shares
+filled in that bin divided by the bin's volume. Sigma is trailing
+volatility the caller passes in. The simulator does not compute it, and it
+does not own a calendar, so it cannot know whether the caller cheated and
+passed a future number. That check belongs to the backtest.
+
+Commission is dollars per filled share. It is subtracted in the cash
+amount. It is not inside the fill price, so a test can see the spread
+without confusing it with the ticket charge. Cash is from the trader's
+side of the account: buying makes it negative. A round trip that buys and
+sells the same schedule, with a positive half spread, loses money even
+when the raw prices match. With the costs set to zero the same round trip
+comes out flat. The impact term is a square-root shape in the spirit of
+Almgren-Chriss. The coefficient is not calibrated to anything. It is there
+so a larger slice of a bin costs more than a smaller slice, and so the
+unit can be explained.
 
 ## Decision log
 
@@ -677,6 +738,121 @@ is a license to claim a strategy.
 model had not been fit, did it order the names the way the subsequent
 return ordered them? Mean Spearman IC is that sentence.
 
+### ADR-013 — The fill is C++, and the research code stays Python
+
+**Context.** The project is for quant and algorithm-developer internships.
+A fill model that lives only as a pandas loop would be easier to install
+and would dodge the only real language boundary in the pipeline. The fill
+itself is a small loop over bins. It does not need a database, a
+dataframe, or the GIL released.
+
+**Decision.** The path, the schedule, the participation cap, and the cost
+are a C++17 library in `cpp/sim`, namespace `driftwood::sim`. pybind11
+exposes one module, `driftwood._sim`. scikit-build-core builds it when the
+package is installed, on Linux, Windows, and macOS. `driftwood/execution.py`
+checks that the module imports and forwards the arguments. It does not
+compute a price. A test reads that file and requires the absence of the
+impact formula, and it checks the wrapper against the native call.
+
+**Alternatives.**
+
+- Pure Python. One less compiler in the README. Also an invitation to
+  "just tweak the fill" in a notebook until the tested code and the
+  research code disagree.
+- Cython, or a hand-written C API. More packaging pain for the same
+  boundary. pybind11 is the usual way to put a small C++ type in front of
+  Python without a second object model.
+- Putting the backtest, the features, or the model in C++. That would move
+  the code I most want to read in an interview into the language I least
+  want to iterate in. The hot loop is the fill. The research logic is not.
+
+**Tradeoff.** A checkout now needs a C++17 compiler and CMake. CI installs
+them and imports `driftwood._sim`, so a broken binding fails the build
+rather than failing a paper trade later. Editable installs still read the
+Python tree from the checkout. The extension itself is the compiled
+artifact in the environment, so a C++ edit is not live until the next
+install. I am not releasing the GIL. One order is a handful of bins, and a
+batch API can come when a backtest shows that the call overhead matters.
+
+**Why this one.** The boundary is the point. Python decides what to trade.
+C++ decides what the trade paid. A reviewer can see that there is no
+second formula.
+
+### ADR-014 — An invented path, three schedules, and a cost that is not calibrated
+
+**Context.** The stored data is a daily bar. An execution internship
+question will ask how an order would have been filled, and "at the close"
+is a dodge once the model is already stamped at the close. I need a path,
+a schedule, and a cost, each strict enough that a property can fail.
+
+**Decision.** The path, the U-shaped volume, the three schedules, and the
+carry rule are the ones in the concept section above. Defaults are 8
+bins, a 10 percent participation cap, and a half spread of 1 basis point.
+Impact starts at zero, so a caller who does not pass a coefficient does
+not pretend to have a market-impact model. Sigma is an argument. Shares
+are fractional. A non-positive price, an inconsistent OHLC, a negative
+quantity, or a participation limit outside `(0, 1]` is a `ValueError`.
+A sell price is clamped at zero so a huge spread cannot make a sale cost
+money beyond the commission.
+
+**Alternatives.**
+
+- Filling everything at the close. Honest about how little we know, and
+  useless for comparing schedules. The comparison is the reason the
+  simulator exists.
+- A stochastic intraday path. More realistic on a plot, and a test can no
+  longer say what the fill must be. Deterministic wins.
+- Calibrating square-root impact to TAQ or to a published coefficient.
+  That is a research project. Shipping a named coefficient I did not
+  estimate would be worse than shipping a zero default and a formula I
+  can derive on a whiteboard.
+- Whole-share rounding. Right for a production OMS. Wrong for a research
+  comparison of schedules, and Alpaca's paper API will accept fractions
+  later anyway.
+
+**Tradeoff.** The path can print the low before the high on an up day even
+when the real session did the opposite. Two bars with the same OHLC share
+a path even when their tapes did not. The participation carry means
+"immediate" is "start at the open," not "cancel the rest." I would rather
+say that out loud than silently drop size. The cost model will not match
+a broker invoice. It will tell two schedules apart, and a round trip will
+not make money out of nothing.
+
+**Why this one.** Every claim in the paragraph above has a test: the path
+stays inside the bar, a small immediate order's raw price is the open,
+TWAP quantities match, VWAP quantities match the profile, the cap binds
+and the leftover moves forward, a buy pays more than raw, a zero-cost
+round trip is flat, and a positive spread loses money.
+
+### ADR-015 — One bar and one order cross the binding
+
+**Context.** It is tempting to pass a dataframe of the whole book into
+C++ and write the backtest there. That would smear the boundary the
+previous decision just drew, and it would make the tests about pybind
+casters instead of about fills.
+
+**Decision.** `simulate` takes the five bar numbers, a positive quantity,
+a side, an algorithm name, the cost scalars, sigma, and the bin count. It
+returns the filled and unfilled size, the cash, two average prices, and
+one record per bin that actually traded. No pandas, no symbol, no date,
+no database handle. The Python wrapper does not open the store either.
+Invalid input is `std::invalid_argument` on the C++ side and `ValueError`
+on the Python side.
+
+**Alternatives.** A batch function that fills a vector of orders in one
+call. Worth it if the backtest spends real time in the transition. Not
+worth a second API before that backtest exists. Releasing the GIL around
+the loop has the same shape: a measurement I do not have yet.
+
+**Tradeoff.** A day with fifty names is fifty calls. That is fine at this
+size. The caller can pass a sigma from the future and the function will
+not notice. The signature makes that a visible argument instead of a
+hidden read of the feature table. The backtest, when it exists, has to
+pass volatility known before the session.
+
+**Why this one.** The native module is allowed to know how to walk a bar.
+It is not allowed to know what a feature is.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -713,9 +889,10 @@ return ordered them? Mean Spearman IC is that sentence.
 - On macOS the LightGBM wheel does not bundle OpenMP. `brew install libomp`
   is required or the import fails. CI installs it. Ridge and the momentum
   baseline do not need it.
-- There is no portfolio and no cost. The information coefficient is not a
-  return and it is not a Sharpe ratio. A forecast can rank names well and
-  still lose money after spread and impact.
+- There is no portfolio. The information coefficient is not a return and
+  it is not a Sharpe ratio. A forecast can rank names well and still lose
+  money after spread and impact. The fill model can price that loss for
+  one order. It does not yet do it for a book.
 - The plain IC t-stat treats days as independent. Overlapping labels make
   it optimistic. The report's Newey-West number is the one to quote for the
   five-day label, and even that is a diagnostic.
@@ -727,16 +904,36 @@ return ordered them? Mean Spearman IC is that sentence.
   left in the table.
 - Demeaning the label uses the other names that day. It does not use other
   days. It is not sector-neutral.
-- No execution simulator, backtest, broker, or dashboard exists yet.
+- The intraday path is invented from OHLC. Two days with the same bar share
+  a path. It is not the tape, and it has no queue position and no opening
+  auction beyond "the first bin is the open."
+- The volume U-shape is the same for every name and every day. VWAP here
+  means "weighted by that guess," not "weighted by the day's real volume
+  curve," which we do not have.
+- Square-root impact is not calibrated. The coefficient defaults to zero.
+  A non-zero coefficient is a knob, not an estimate.
+- An immediate order that does not fit in the opening bin walks forward.
+  It is not cancelled at the open.
+- Shares are fractional. A sell price is clamped at zero so an absurd
+  spread cannot go negative.
+- Sigma is trusted. The simulator will apply whatever volatility it is
+  given, including one from the future. The caller has to pass a number
+  known before the session.
+- Orders do not see each other. Two names trading in the same bin do not
+  add to each other's participation. There is no borrow fee.
+- A C++ change is compiled by reinstalling the package. The Python sources
+  in an editable install update without that.
+- No portfolio backtest, broker, or dashboard exists yet.
 
 ## What I would build next on this stage
 
-An execution simulator with an explicit fill and a cost, before any claim
-that the forecast makes money. A good IC is not a strategy. After that, a
-portfolio rule and a backtest that can only trade the prediction, with the
-same-day return left on the table.
+A portfolio rule and a backtest that can trade only the next session's
+fill, comparing immediate, TWAP, and VWAP on the same forecasts. The
+same-day return stays out of the trade. The backtest has to pass a
+volatility from before the session, and it has to trade `prediction`
+rather than `label`.
 
-Still owed from the data stage, and not blocking the simulator: a
+Still owed from the data stage, and not blocking that backtest: a
 point-in-time membership table, a stored split factor so dollar volume is
 unambiguous, and sector-neutral z-scores.
 
@@ -748,9 +945,9 @@ Two-minute version of what exists today. Later milestones extend this answer;
 they do not get claimed yet.
 
 "Driftwood is a US equity research pipeline I'm building from daily prices
-through paper trading. What exists so far is the data, the features, and a
-walk-forward return model. I have not simulated a portfolio or a cost yet,
-so I do not have a Sharpe ratio to quote.
+through paper trading. What exists so far is the data, the features, a
+walk-forward return model, and a C++ fill. I have not run a portfolio
+backtest, so I do not have a Sharpe ratio to quote.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
 survivorship bias and I say that before any result. I download daily bars
@@ -781,7 +978,15 @@ forward return, then I average those days. A positive mean means the order
 was right more often than not. It is not a return. The report also shows a
 pooled regression, and those are different numbers. The test I would walk
 through scrambles every label after a fold's last training date and requires
-that fold's forecast to stay put."
+that fold's forecast to stay put.
+
+The fill is a separate program. A daily bar has no tape, so the C++ side
+invents a path that stays inside the high and the low and schedules the
+order as a market-on-open, a TWAP, or a VWAP against a U-shaped volume
+guess. A bin can take only a fraction of its volume. Buys pay a half
+spread and a square-root impact. Python calls that module and does not
+keep a second copy of the formula. A round trip loses the spread, and
+that is a test."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -904,3 +1109,43 @@ momentum and does not fit anything. If ridge does not beat that, I should
 not add complexity. I do keep a small gradient-boosted tree, with no
 subsampling so the test can rerun it, as a check. It is not the result I
 lead with."
+
+### Why is the execution simulator in C++?
+
+"The research code is Python because that is where I want to change a
+feature or a model and rerun a test. The fill is the piece I do not want a
+notebook to quietly reimplement. It is a C++17 library, bound with
+pybind11, and it is built when the package installs. The Python file that
+calls it does not contain the price formula. A test checks the wrapper
+against the native module and also checks that the formula is not in the
+Python source. I did not move the model or the database into C++. One
+order is a few bins. I have not released the GIL, and I would want a
+measurement from the backtest before I did."
+
+### What do TWAP and VWAP mean if you only have daily bars?
+
+"They are schedules on a model of the session, not claims about the tape.
+I split the day into bins. TWAP puts the same number of shares in each
+bin. VWAP puts shares in proportion to a U-shaped volume guess, heavier
+at the open and the close, because that is the usual equity pattern and
+because the bar does not contain the real curve. The price path is also
+invented: open, then the far extreme, then the near extreme, then the
+close, piecewise linear, and it has to stay inside the high and the low.
+An immediate order is priced at the open. If it is too big for the
+opening bin's participation cap, the rest walks forward. I say that
+explicitly so nobody hears 'market-on-open' and thinks the leftover was
+cancelled."
+
+### How does a fill get its price?
+
+"The raw price comes from the path. The trader then pays half the spread,
+one basis point by default, plus an impact term: a coefficient times the
+volatility I pass in times the square root of the fraction of the bin I
+took. A buy pays more than raw. A sell receives less. Commission is per
+share and it is in the cash, not baked into the price, so I can see the
+two costs separately. The impact coefficient defaults to zero. I have not
+calibrated it, and I do not want a named number I did not estimate. Sigma
+is an argument. The simulator has no calendar, so it cannot stop me from
+passing a future volatility. The backtest will have to pass yesterday's.
+A round trip with a positive spread loses money. With the costs zeroed,
+the same round trip is flat. Both of those are tests."
