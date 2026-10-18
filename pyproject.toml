@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driftwood"
-version = "0.2.0"
+version = "0.3.0"
 description = "A learning-focused quantitative research and paper-trading pipeline for US stocks."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,9 @@ dependencies = [
     "duckdb>=1.1",
     "yfinance>=0.2.50",
     "python-dotenv>=1.0",
+    "scikit-learn>=1.4",
+    "statsmodels>=0.14",
+    "lightgbm>=4.3",
 ]
 
 [project.optional-dependencies]
