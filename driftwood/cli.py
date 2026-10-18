@@ -93,7 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         "--label-horizon",
         type=int,
         default=None,
-        help="Override the horizon inferred from the label (1 for fwd_ret_1d, 5 for fwd_ret_5d).",
+        help=(
+            "Extend the horizon inferred from the label "
+            "(1 for fwd_ret_1d, 5 for fwd_ret_5d). Cannot be shorter."
+        ),
     )
     train.add_argument(
         "--train-days",
@@ -183,8 +186,14 @@ def _features(args: argparse.Namespace) -> int:
 
 
 def _train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    inferred = horizon_for_label(args.label)
     if args.label_horizon is None:
-        horizon = horizon_for_label(args.label)
+        horizon = inferred
+    elif args.label_horizon < inferred:
+        parser.error(
+            f"--label-horizon must be at least {inferred} for {args.label}, "
+            f"got {args.label_horizon}"
+        )
     else:
         horizon = args.label_horizon
     try:
