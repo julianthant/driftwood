@@ -30,6 +30,9 @@ flowchart LR
   labelfn[Forward labels]
   features[(features table)]
   labels[(labels table)]
+  train[Walk-forward fit]
+  predictions[(predictions table)]
+  report[IC report]
   notebook[Exploratory notebook]
 
   universe --> ingest
@@ -40,6 +43,10 @@ flowchart LR
   bars --> labelfn
   featfn --> features
   labelfn --> labels
+  features --> train
+  labels --> train
+  train --> predictions
+  predictions --> report
   bars --> notebook
 ```
 
@@ -55,6 +62,10 @@ Commands that write the file:
   laptop with no network.
 - `driftwood features` rebuilds the feature and label tables from whatever
   bars are already stored.
+- `driftwood train` reads those two tables, fits a fresh model on each
+  training window, and writes out-of-sample predictions. `--report` writes
+  the information-coefficient note beside the file. The predictions table
+  keeps one row set per model name.
 
 ## Finance concepts in plain language
 
@@ -132,6 +143,56 @@ cutoff. Every feature value on or before that cutoff has to match. The test
 also runs the same check on a negative shift, a centered window, and a
 full-sample z-score, and those three are required to fail. If someone
 "simplifies" the test later, the negative cases still have to go red.
+
+### Walk-forward validation
+
+A model that is fit on a random mix of dates will train on days that, in
+life, had not happened yet. Walk-forward refuses that. Time is cut into
+successive test windows. The default test is 63 sessions, about a quarter.
+The fit for a window uses only sessions before it, and not even all of
+those: a purge is left in between.
+
+The purge is the embargo, and it is at least the label horizon. `fwd_ret_1d`
+on the day before the test is the return from that close to the first test
+close. If that row is in the training set, the model has already seen part
+of the test outcome. Five purged sessions is the default, which also covers
+`fwd_ret_5d`.
+
+The training window expands by default. After a test quarter has happened,
+the next fold may train on it. That is not leakage. Those returns are in the
+past relative to the new test window. `--rolling` keeps a fixed length when
+the older regime should fall out of the fit.
+
+What gets stored is the out-of-sample forecast. How well the model fit its
+own training window is reduced to one number, the in-sample mean IC, so
+those rows cannot be traded by accident later.
+
+### Information coefficient
+
+The information coefficient on a day is the correlation, across the names in
+the book, between the forecast and the realized forward return. Spearman
+correlation uses ranks. That is the headline, because a cross-sectional book
+makes or loses money by ordering names, not by the units of the forecast.
+The mean IC averages the daily number. A positive mean means the order was
+right more often than wrong.
+
+It is not a portfolio return. It does not know about position size, shorts,
+or costs. A Sharpe ratio is a later question.
+
+Two numbers that sit next to the IC and are not the IC:
+
+- Pearson correlation, which keeps magnitude instead of rank.
+- A pooled regression of every realized return on every forecast. The slope
+  is a hedge ratio. A day when every forecast is identical has no rank to
+  score, so the IC for that day is missing, even if a pooled slope could
+  still be estimated from other days.
+
+The t-stat that divides the mean IC by its standard error treats days as
+independent. Overlapping labels break that. A five-day return shares four
+days with the next one, so the plain t-stat is too flattering. The report
+also prints a Newey-West (HAC) t-stat with lags equal to the horizon. That
+is the number to quote when the label is longer than one day. It is still a
+diagnostic, not a promise.
 
 ## Decision log
 
@@ -480,6 +541,124 @@ scale, and the truncation test covers the z-score columns, not just the raw
 ones. A full-sample scaler is one of the cases the test is required to
 reject.
 
+### ADR-010 — Ridge as the model I would say out loud
+
+**Context.** The features are already z-scored inside each day. The label is
+a noisy daily return. The sample is about ten years of fifty names. The
+model has to be something I can describe in a sentence, with a dumb
+comparison next to it, and a check that a linear fit is not obviously
+leaving a nonlinear pattern on the table.
+
+**Decision.** The default is scikit-learn's `Ridge` with alpha 1 and an
+intercept, on `MODEL_FEATURES` only (the z-score columns). There is no
+second scaler. A momentum baseline predicts `z_mom_12_1` and ignores the
+target on purpose. LightGBM is a small deterministic tree: 40 trees, 8
+leaves, no row or column subsampling, one thread, a fixed seed. It is not
+the model I would quote. A feature that is entirely missing in a fold, which
+is what 12-minus-1 momentum is for the first year, is dropped for that fold
+instead of deleting every row.
+
+**Alternatives.**
+
+- A neural net. More capacity than a few dozen names and a handful of
+  features can identify, and nothing to point at in an interview except the
+  loss curve.
+- Fitting a `StandardScaler` on the training window. Reasonable for raw
+  inputs. Redundant here, and easy to fit by accident on the whole file.
+- Training on the raw columns. A log-volume then dominates a return, and the
+  coefficient stops meaning "a one-standard-deviation difference."
+- Shuffled cross-validation. Covered in ADR-011. It is the wrong split.
+
+**Tradeoff.** Ridge will not see an interaction. The tree might, and it can
+also memorize a 50-name cross section if the caps come off. Alpha is not
+tuned on the test IC. Choosing it that way would be another leak, so it
+stays fixed. The tree's settings are there so a test can rerun the fit, not
+so the tree wins a contest.
+
+**Why this one.** A coefficient is a sentence: this fold was long recent
+momentum, or it was not. The baseline tells me whether the fit beat a
+feature I already believed in. If it did not, the extra machinery is not
+earning its keep.
+
+### ADR-011 — Walk-forward, with a purge of at least the label horizon
+
+**Context.** `fwd_ret_1d` on day `t` uses the close on day `t+1`. If day `t`
+is in the training set and day `t+1` is in the test set, the fit has seen
+part of the outcome it is about to be scored on. A random split does this
+constantly. An expanding split that trains through the day before the test
+does it on the last training row. A five-day label does it for five rows.
+
+**Decision.** `WalkForwardConfig.purge` is `max(embargo_days, label_horizon)`.
+Defaults are 252 training sessions before the first test, 63-session tests,
+an embargo of 5, and a horizon inferred from the label (1 or 5). The window
+expands. `--rolling` with `--train-days` (default 756) is the alternative.
+The label is demeaned within each date before the fit, so the target is a
+relative return, and that mean uses only names on that date. It does not
+use other dates. Out-of-sample predictions are the only rows stored.
+In-sample mean Spearman IC is one summary number on the result.
+
+**Alternatives.**
+
+- K-fold on rows. Simple, and it leaks the future into the past.
+- Purged and embargoed cross-validation in the Lopez de Prado sense. That
+  is the right tool when the folds are not a single live path. This project
+  is a single live path: at the start of a quarter I would have fit on what
+  I knew, then waited. Walk-forward is that story.
+- No embargo. Fewer lines, and wrong as soon as the label looks past the
+  training cutoff.
+
+**Tradeoff.** Every boundary throws away a few training rows. Five sessions
+is small next to a year, and it covers the five-day label even when the
+horizon argument is left at 1 and the embargo stays at the default. An
+expanding window gives later folds more data and mixes more regimes. The
+rolling option exists for that reason. It is not the default, because with
+fifty names the early years are already short. Demeaning inside the day
+makes the target match a long-short book, and it also means one name's
+label moves the target of the other names that day. Those other labels are
+realized at the same time. They are not future days.
+
+**Why this one.** It is how the book would have been run. The test scrambles
+every label after a fold's last training date and requires that fold's
+forecast, and its weights, to stay put. Scrambling an earlier test window
+is allowed to change a later fold. By then those returns have been realized.
+
+### ADR-012 — Mean Spearman IC, and the numbers that are not the IC
+
+**Context.** "The model works" needs a number about ranking names on a day,
+which is what this book would trade. A single R-squared on pooled returns
+answers a different question and looks more precise than it is. Overlapping
+labels make an ordinary t-stat too large.
+
+**Decision.** The headline is the mean of the daily Spearman IC.
+`summarize_ic` also reports the standard deviation of the daily IC, the IR
+(mean divided by that standard deviation), the hit rate, a naive t-stat,
+and a Newey-West t-stat whose lag is the label horizon. Pearson IC is
+written next to the headline. `prediction_regression` is a pooled OLS of
+the realized return on the forecast, and the markdown says it is not the
+IC. When the horizon is longer than one day, the HAC t-stat is the one to
+quote.
+
+**Alternatives.**
+
+- Only the pooled regression. It rewards a well-scaled forecast and can be
+  estimated on days when the cross section has no rank. That is a useful
+  second number and a bad headline.
+- Only a portfolio Sharpe. That mixes the forecast with sizing and with
+  costs, and neither of those exists yet. A good IC can still lose money
+  after spread. That is the next milestone's problem, and it should not be
+  hidden inside this one.
+
+**Tradeoff.** Spearman throws away magnitude. A forecast that ranks
+perfectly and is scaled badly still has an IC near one. The pooled slope is
+where the scale shows up, which is why it stays in the report. The naive
+t-stat is printed so the flattery is visible, not so it can be quoted
+alone. HAC on a short series of daily ICs is itself noisy. Neither t-stat
+is a license to claim a strategy.
+
+**Why this one.** The question I want the report to answer is: on days the
+model had not been fit, did it order the names the way the subsequent
+return ordered them? Mean Spearman IC is that sentence.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -504,16 +683,37 @@ reject.
 - Same-day high and low are inputs. The features are invalid for an
   open-of-day decision without removing them.
 - `mom_12_1` is missing for roughly the first year of each name. Those cells
-  stay missing.
-- No model, simulator, backtest, broker, or dashboard exists yet.
+  stay missing. The momentum baseline refuses to train on that empty column
+  rather than inventing a fit. Ridge drops the column for the folds where
+  it is entirely missing and uses it once it exists.
+- The headline model is linear. The tree is a check with small, untuned
+  settings. Alpha is fixed. It is not chosen by looking at the test IC.
+- There is no portfolio and no cost. The information coefficient is not a
+  return and it is not a Sharpe ratio. A forecast can rank names well and
+  still lose money after spread and impact.
+- The plain IC t-stat treats days as independent. Overlapping labels make
+  it optimistic. The report's Newey-West number is the one to quote for the
+  five-day label, and even that is a diagnostic.
+- The predictions table stores the realized label beside the forecast so a
+  report can be rebuilt. Anything that trades later has to use `prediction`
+  and leave `label` alone.
+- `driftwood train` replaces the rows for the model name it was given. It
+  does not keep a history of every experiment. A different model name is
+  left in the table.
+- Demeaning the label uses the other names that day. It does not use other
+  days. It is not sector-neutral.
+- No execution simulator, backtest, broker, or dashboard exists yet.
 
 ## What I would build next on this stage
 
-A point-in-time membership table. A stored split factor (`adj_close / close`,
-or a cleaner split-only factor) so dollar volume and adjusted high/low are
-unambiguous. Sector-neutral z-scores, by demeaning inside sector before the
-full-universe z-score. None of that blocks a baseline model, as long as the
-survivorship limitation and the close-of-day clock stay written down.
+An execution simulator with an explicit fill and a cost, before any claim
+that the forecast makes money. A good IC is not a strategy. After that, a
+portfolio rule and a backtest that can only trade the prediction, with the
+same-day return left on the table.
+
+Still owed from the data stage, and not blocking the simulator: a
+point-in-time membership table, a stored split factor so dollar volume is
+unambiguous, and sector-neutral z-scores.
 
 ## Interview questions
 
@@ -523,33 +723,39 @@ Two-minute version of what exists today. Later milestones extend this answer;
 they do not get claimed yet.
 
 "Driftwood is a US equity research pipeline I'm building from daily prices
-through paper trading. What exists so far is the data and the features, and
-the features are not allowed to see the future.
+through paper trading. What exists so far is the data, the features, and a
+walk-forward return model. I have not simulated a portfolio or a cost yet,
+so I do not have a Sharpe ratio to quote.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
-survivorship bias and I say that before quoting any result. I download daily
-bars with yfinance, auto-adjust off, and I store the raw close next to the
+survivorship bias and I say that before any result. I download daily bars
+with yfinance, auto-adjust off, and I store the raw close next to the
 adjusted close. Returns use the adjusted series, so a split is not a crash.
-The raw close is how I check the vendor. Tests use a synthetic book with a
-known 2-for-1 split and never call the network.
-
-Bars are validated and upserted into a local DuckDB file on symbol and date.
-I picked DuckDB over Postgres because this is one researcher and one file,
-and over CSV because I want a primary key.
+Tests use a synthetic book and never call the network. Bars are validated
+and upserted into a local DuckDB file on symbol and date.
 
 A feature is stamped at the close. On day t it may use that day's bar and
-earlier bars, not tomorrow's. The set is small on purpose: trailing returns,
-12-minus-1 momentum, 21-day volatility, a volume shock, distance from a
-trailing average, the day's high-low range, and log volume. I winsorize and
-z-score each one across the names on that same day. I do not fit a scaler on
-the whole sample, because then 2018 would know about 2024. The next-day and
-five-day returns are labels. They live in a separate function and a separate
-table, so a select from the feature table cannot see the answer.
+earlier bars, not tomorrow. I z-score each feature across the names on that
+same day. I do not fit a scaler on the whole file, because then 2018 would
+know about 2024. The next-day and five-day returns are labels, in their own
+table.
 
-The test I would walk through truncates history at a cutoff and rebuilds the
-features. They have to match. A centered moving average fails that test, and
-so does a z-score fit on the full sample. Those failures are in the suite, so
-the check is not a comment."
+The model I would defend is a ridge regression on those z-scores. Next to it
+I keep a baseline that just predicts 12-minus-1 momentum, and a small
+gradient-boosted tree as a check that the linear fit is not missing
+something obvious. I do not shuffle days. Each test window is the next
+quarter. The fit uses only earlier sessions, and I drop a purge of at least
+the label horizon so the training label does not reach into the test. Once
+that quarter has happened, the next fold may train on it. That is
+walk-forward, not leakage.
+
+I score the forecasts with the information coefficient. Each day I take the
+rank correlation, across names, between the forecast and the realized
+forward return, then I average those days. A positive mean means the order
+was right more often than not. It is not a return. The report also shows a
+pooled regression, and those are different numbers. The test I would walk
+through scrambles every label after a fold's last training date and requires
+that fold's forecast to stay put."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -572,12 +778,12 @@ close and warn, rather than guessing a factor."
 
 ### Does this backtest have survivorship bias?
 
-"The data stage already does, and I have not backtested yet. The universe is
-50 names that are large and liquid now. Anything that was delisted or fell
-out of the large-cap set over the last ten years is absent. I would not quote
-a performance number from this list as if it were a tradable historical
-S&P 500. The fix is a membership table with as-of dates, and I have not built
-that."
+"The panel the model trains on does, and I have not built a portfolio
+backtest yet. The universe is 50 names that are large and liquid now.
+Anything that was delisted or fell out of the large-cap set over the last
+ten years is absent. The information coefficient is a ranking score on this
+list, not a tradable historical S&P 500. The fix is a membership table with
+as-of dates, and I have not built that."
 
 ### How do you test a downloader without hitting the network?
 
@@ -621,4 +827,49 @@ walk-forward fold if the fit stops before the test dates. It is not fine fit
 on the whole file. I winsorize at 5 and 95 percent first so one bad print
 does not set the scale, and I use the population standard deviation because
 this is a rescaling, not a volatility estimate. The realized-vol feature uses
-the sample divisor on purpose. They are different jobs."
+the sample divisor on purpose. They are different jobs. The ridge model does
+not scale again. The columns it sees are already in z-score units, so a
+coefficient is a response to a one-standard-deviation difference that day."
+
+### What is walk-forward, and why is there an embargo?
+
+"I pretend I am standing at the start of a quarter with only the past in
+hand. I fit on that past, I forecast the next 63 sessions, and then I step
+forward and do it again. The training window expands, so a quarter I have
+already lived through becomes legal training data for the next one.
+
+The embargo is the gap I leave before the test. A one-day forward return on
+the last training day is the move from that close to the next close, and the
+next close is inside the test window. If I train on that row, I have peeked.
+The purge is the embargo I asked for, and at least the number of sessions
+the label looks ahead. The default embargo is five days, which also covers
+the five-day label. The test scrambles every label after the training cutoff
+and the forecast is not allowed to move."
+
+### What is an information coefficient, and how is it different from a regression?
+
+"On a single day, the IC is the correlation across names between my forecast
+and the return that then happened. I use Spearman, so it is about the
+ranking. I average that across days. Positive means I ordered the book the
+right way more often than not. It says nothing about how large the positions
+were, and nothing about costs, so it is not a Sharpe ratio.
+
+A pooled regression dumps every name and every day into one line of realized
+return on forecast. The slope tells me the scale of the forecast. A day
+where every forecast is the same has no ranking, so that day's IC is
+missing, even though those rows could still pull on a pooled slope. I print
+both, and I say which one I am quoting. When the label is a five-day
+return, the daily ICs overlap, and the ordinary t-stat is too kind. I quote
+the Newey-West t-stat instead."
+
+### Why ridge, instead of a more flexible model?
+
+"The features are a short list of z-scores and the sample is fifty names. A
+flexible model will fit noise and I will not be able to say what it learned.
+Ridge gives me a coefficient per feature, in units of a one-standard-deviation
+cross-sectional difference, with a fixed penalty so I am not tuning alpha on
+the test window. The comparison is a baseline that predicts 12-minus-1
+momentum and does not fit anything. If ridge does not beat that, I should
+not add complexity. I do keep a small gradient-boosted tree, with no
+subsampling so the test can rerun it, as a check. It is not the result I
+lead with."
