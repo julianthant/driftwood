@@ -14,9 +14,10 @@ trimmed to the interviewer's patience.
 
 ## Architecture
 
-Milestone 1 is the data stage only. Prices enter through one function, get
-checked, and land in a local database. The notebook reads that database. It
-does not compute signals.
+Prices enter through one function, get checked, and land in a local database.
+Features and labels are computed from that table and written back into the
+same file, in two tables, so a query against `features` cannot see the
+forward return.
 
 ```mermaid
 flowchart LR
@@ -24,26 +25,36 @@ flowchart LR
   yfinance[yfinance daily bars]
   synthetic[Synthetic bars]
   ingest[Validate and upsert]
-  duckdb[(DuckDB file)]
+  bars[(DuckDB bars)]
+  featfn[Close-of-day features]
+  labelfn[Forward labels]
+  features[(features table)]
+  labels[(labels table)]
   notebook[Exploratory notebook]
 
   universe --> ingest
   yfinance --> ingest
   synthetic --> ingest
-  ingest --> duckdb
-  duckdb --> notebook
+  ingest --> bars
+  bars --> featfn
+  bars --> labelfn
+  featfn --> features
+  labelfn --> labels
+  bars --> notebook
 ```
 
 A study is one DuckDB file. The default path is `data/driftwood.duckdb`
 (`DRIFTWOOD_DB` overrides it). Rebuilding the file is always allowed; nothing
 downstream is allowed to assume a hidden cache of unadjusted prices.
 
-Two commands write the file:
+Commands that write the file:
 
 - `driftwood ingest --start ... --end ...` calls yfinance.
 - `driftwood ingest --synthetic` writes a deterministic random walk, with an
   optional 2-for-1 split, so the rest of the pipeline can be developed on a
   laptop with no network.
+- `driftwood features` rebuilds the feature and label tables from whatever
+  bars are already stored.
 
 ## Finance concepts in plain language
 
@@ -88,15 +99,39 @@ the names are recognizable, and the downloads are reliable. It is not a
 point-in-time S&P 500. Any performance number produced later has this bias
 until a historical membership table is added. Say that before anyone asks.
 
-### What "as of the close" will mean
+### Lookahead bias
 
-No feature code exists yet. The storage choice is already shaped by the rule
-we will enforce next: a decision stamped at the close of day `t` may use the
-open, high, low, close, adjusted close, and volume of day `t`, and nothing
-from day `t+1`. Both the raw and adjusted fields are known at that close
-because the vendor publishes them with the daily bar. Putting the adjusted
-close in the same row as the raw close does not, by itself, look into the
-future. Using tomorrow's adjusted close as today's input would.
+Lookahead bias is using information that was not available at the time of the
+decision and then treating the result as if you could have traded it. The
+classic version in this kind of project is a feature on Monday that quietly
+includes Tuesday's close. The backtest looks brilliant. The live book cannot
+see Tuesday.
+
+Driftwood's rule is stamped at the **close** of session `t`. A feature on
+that row may use the open, high, low, close, adjusted close, and volume of
+session `t`, and any earlier session. It may not use session `t+1`. The same
+day's high and low are allowed, because the decision is after the close, when
+those prints have happened. They would not be allowed for a decision at the
+open. That distinction is the whole argument, and it is written down as
+`SIGNAL_TIME = "close"` next to the feature code.
+
+The forward return is not a feature. `fwd_ret_1d` on day `t` is the adjusted
+return from that close to the next stored close. It is the thing we would
+like to predict. It lives in `labels.py` and in a separate database table.
+
+Two operations that feel innocent and are not:
+
+- A centered rolling mean. The value dated Monday uses days on both sides of
+  Monday.
+- A z-score, or any scaler, fit on the whole sample. The 2018 value then
+  depends on the dispersion of 2024.
+
+The check is truncation, and it is a test rather than a comment. Build the
+features on the full panel. Build them again using only rows on or before a
+cutoff. Every feature value on or before that cutoff has to match. The test
+also runs the same check on a negative shift, a centered window, and a
+full-sample z-score, and those three are required to fail. If someone
+"simplifies" the test later, the negative cases still have to go red.
 
 ## Decision log
 
@@ -304,6 +339,147 @@ on top, not expect the walk to contain it.
 **Why this one.** It makes the adjusted-close story demonstrable in the
 notebook and lockable in a test, with no network.
 
+### ADR-007 — Features are known at the close, and labels are a different function
+
+**Context.** Every later number in the project is a claim about what was
+knowable at a timestamp. The dangerous mistake is not a subtle off-by-one in
+a model. It is a feature column that agrees with the future because it
+contains the future.
+
+**Decision.** `build_features` is the only function a model is allowed to
+treat as an input, and it is causal at the close. `build_labels` is the only
+function allowed to call `shift(-...)`. They are merged in
+`build_research_frame` on `(symbol, date)` with a one-to-one check, and they
+are stored in two DuckDB tables. `MODEL_FEATURES` is the z-scored columns.
+`LABEL_COLUMNS` is `fwd_ret_1d` and `fwd_ret_5d`. Training code, when it
+arrives, has to name one of those lists. It does not get to do `select
+numeric columns`.
+
+`assert_causal_features` implements the truncation test. The feature modules
+that claim to be causal are also scanned for `.shift(-` and `center=True`.
+The label module is scanned for the opposite, so the source test cannot be
+satisfied by deleting the labels.
+
+**Alternatives.**
+
+- Compute everything in one function and ask reviewers to be careful. That
+  lasts until the first late-night edit.
+- Shift every feature by one day "to be safe," which throws away the close
+  and still does not catch a centered window or a full-sample scaler.
+- Only test that the label column is not in the feature list. That catches
+  the obvious leak and misses the window that reaches past the cutoff.
+
+**Tradeoff.** The close-of-day rule means a feature may use today's high.
+That is correct for a decision made after the close and wrong for a decision
+made at the open. Encoding the timestamp in a constant forces the
+conversation instead of hiding it. The truncation test costs a few extra
+feature builds in CI. That is cheap next to a leaked backtest.
+
+**Why this one.** The failure mode is silent and flattering. The test has to
+be able to fail, including on purpose, or it is documentation.
+
+### ADR-008 — Which features, and why these
+
+**Context.** The first model needs a small set of inputs an interviewer can
+explain, built only from daily bars. This is not a search for the best
+alpha.
+
+**Decision.** Ten raw features, all simple returns or ratios of adjusted
+close except where noted:
+
+- `ret_1d`, `rev_5`, `mom_21`, `mom_63`: trailing simple returns over 1, 5,
+  21, and 63 sessions.
+- `mom_12_1`: close from 21 sessions ago over close from 252 sessions ago,
+  minus one. This is the classic 12-minus-1 momentum: the year of return
+  ending one month ago. The skipped month is where short-term reversal
+  usually shows up, so it is its own feature (`rev_5`) rather than being
+  mixed into the year.
+- `vol_21`: standard deviation of `ret_1d` over 21 sessions, sample divisor
+  (`ddof=1`), minimum 15 observations. Not annualized. A model coefficient
+  can rescale it.
+- `volume_shock`: volume divided by its own 21-session trailing mean.
+- `dist_sma_21`: adjusted close over its 21-session mean, minus one.
+- `hl_range`: `(high - low) / close`, using the raw prints because they share
+  a scale. Dividing a raw range by the adjusted close blows up on a split.
+- `log_volume`: log of share volume. Not dollar volume. Dollar volume needs a
+  price and a volume that agree about splits, and the raw close and the
+  vendor volume do not always agree. See the limitations.
+
+Returns are simple, not log. A later portfolio sums simple returns across
+names. Log returns would be a better input to a volatility estimate and a
+worse match to the backtest's accounting. Volatility uses the simple returns
+anyway, with the sample standard deviation, and the choice is local to that
+column.
+
+`ret_1d` is the change since the previous stored session for that symbol. On
+a complete business-day panel that is one session. A hole in the panel makes
+it a multi-day return. We do not forward-fill prices to hide the hole.
+
+**Alternatives.**
+
+- A large technical-indicator library. More columns, more chances to leak,
+  and nothing to say in an interview except "the library did it."
+- Log returns throughout. Cleaner for compounding, less obvious when the
+  label is a holding-period return.
+- Dollar volume as a liquidity feature. Right idea, wrong until the split
+  factor is stored explicitly.
+
+**Tradeoff.** Ten features will not span the cross-section of a real
+multi-factor model. They are enough to see whether a linear model has any
+rank correlation with the next day's return, which is the next milestone.
+Long-window features are missing for the first year of a name. Those rows
+stay in the table as missing. They are not filled with zero, because zero is
+a real value (a flat return, a z-score at the mean).
+
+**Why this one.** Each column has a one-sentence definition and a hand-checked
+formula in the tests. That is the bar for adding the next column too.
+
+### ADR-009 — Cross-sectional z-scores, fit inside the day
+
+**Context.** The raw features are in different units. A ridge regression on
+`log_volume` next to `ret_1d` mostly fits the volume. The usual fix is to
+standardize. The usual leak is to fit that standardization on the sample you
+are about to pretend you did not see.
+
+**Decision.** For each raw feature and each date, clip the cross-section at
+the 5th and 95th percentiles, then subtract the mean and divide by the
+population standard deviation (`ddof=0`). The result is `z_<feature>`. The
+raw column is kept, unclipped, so a clipped name can be inspected. A day
+with no dispersion becomes 0 for names that had a value. Missing inputs stay
+missing. `MODEL_FEATURES` points at the z-scores only.
+
+The population divisor is deliberate and different from `vol_21`. Realized
+volatility is a sample estimate, so it uses `ddof=1`. The z-score is a
+rescaling of one day's names, and `ddof=0` is the rescaling that does not
+depend on a Bessel correction. With 50 names the two are almost the same.
+The reason to pick one and write it down is so the choice is not an accident
+of a library default.
+
+**Alternatives.**
+
+- `StandardScaler` fit on the training window inside each walk-forward fold.
+  Also causal, if the fit truly stops at the training cutoff, and a
+  reasonable thing to add inside the model rather than inside the feature.
+  It standardizes across time and names together, which is a different
+  object from "how unusual is this name today."
+- Rank transform to `[-0.5, 0.5]`. More robust to outliers, less connected
+  to a linear coefficient's units. Worth trying later. Winsorizing first is
+  the smaller step.
+- No scaling, and let the model regularize. Ridge can survive it. The
+  coefficient on volume is then not comparable to the coefficient on
+  momentum, which makes the model harder to talk about.
+
+**Tradeoff.** A z-score inside a 50-name universe is not a z-score against
+the market. A name can look extreme because the other 49 were quiet. The
+5/95 clip with 50 names moves only the tails. It will not save a bad data
+point that is merely large rather than absurd, and it is not a substitute
+for the bar validator.
+
+**Why this one.** It is causal by construction, it puts the features on one
+scale, and the truncation test covers the z-score columns, not just the raw
+ones. A full-sample scaler is one of the cases the test is required to
+reject.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -316,15 +492,28 @@ notebook and lockable in a test, with no network.
 - `universe_members` is replaced on each ingest with the symbols requested
   that time. It is "who this file was last loaded for," not a history of
   membership.
-- No feature, model, simulator, backtest, broker, or dashboard exists yet.
+- `ret_1d` crosses a gap when a symbol is missing a session. It is not
+  forward-filled back into a one-calendar-day return.
+- `volume_shock` and `log_volume` use vendor volume as stored. yfinance
+  volume is usually already split-adjusted, while our synthetic split doubles
+  raw volume, so the synthetic book shows a volume spike the vendor series
+  usually will not. Dollar volume is not a feature until a split factor is
+  stored on purpose.
+- The z-score is against this 50-name universe on that day, not against the
+  market. It is not sector-neutral.
+- Same-day high and low are inputs. The features are invalid for an
+  open-of-day decision without removing them.
+- `mom_12_1` is missing for roughly the first year of each name. Those cells
+  stay missing.
+- No model, simulator, backtest, broker, or dashboard exists yet.
 
 ## What I would build next on this stage
 
-A point-in-time membership table, even a hand-maintained one for the years
-under study. A stored adjustment factor (`adj_close / close`) computed at
-ingest so later code cannot divide by a zero close unnoticed. An export to
-Parquet for anything that wants to leave DuckDB. None of that is required to
-start feature work, as long as the survivorship limitation stays written down.
+A point-in-time membership table. A stored split factor (`adj_close / close`,
+or a cleaner split-only factor) so dollar volume and adjusted high/low are
+unambiguous. Sector-neutral z-scores, by demeaning inside sector before the
+full-universe z-score. None of that blocks a baseline model, as long as the
+survivorship limitation and the close-of-day clock stay written down.
 
 ## Interview questions
 
@@ -333,33 +522,34 @@ start feature work, as long as the survivorship limitation stays written down.
 Two-minute version of what exists today. Later milestones extend this answer;
 they do not get claimed yet.
 
-"Driftwood is a US equity research pipeline I am building end to end, from
-daily prices through paper trading. The first piece is the data layer,
-because every result after it depends on those rows being the rows I think
-they are.
+"Driftwood is a US equity research pipeline I'm building from daily prices
+through paper trading. What exists so far is the data and the features, and
+the features are not allowed to see the future.
 
-I keep a fixed list of 50 liquid large caps. I download daily bars with
-yfinance, with auto-adjust turned off, so I store the raw open, high, low,
-close, and the adjusted close side by side. Adjusted close is what I will use
-for returns, since splits and dividends would otherwise look like price
-moves. The raw close is how I check the vendor. A synthetic generator writes
-the same schema, including a 2-for-1 split, so I can develop without the
-network.
+The universe is 50 liquid large caps, a current snapshot, so it has
+survivorship bias and I say that before quoting any result. I download daily
+bars with yfinance, auto-adjust off, and I store the raw close next to the
+adjusted close. Returns use the adjusted series, so a split is not a crash.
+The raw close is how I check the vendor. Tests use a synthetic book with a
+known 2-for-1 split and never call the network.
 
-Before anything hits disk I drop bars with missing dates, non-positive prices,
-a high/low that cannot contain the open and close, or a nonsense volume.
-Duplicates for the same symbol and day collapse to the last copy. The
-survivors go into a local DuckDB file, keyed by symbol and date, so a rerun
-overwrites instead of appending a second copy. Each run writes a log row with
-how many rows were rejected and which symbols never arrived.
+Bars are validated and upserted into a local DuckDB file on symbol and date.
+I picked DuckDB over Postgres because this is one researcher and one file,
+and over CSV because I want a primary key.
 
-I chose DuckDB over Postgres because this is one researcher and one file, and
-over a pile of CSVs because I want a primary key and a coverage query. The
-limitation I will say out loud is survivorship: this is today's liquid names,
-not the historical S&P 500, so any backtest I add later is optimistic until I
-fix membership. Tests never call the network. They pass a frame that looks
-like yfinance, and they check that the real call would have asked for
-unadjusted prices."
+A feature is stamped at the close. On day t it may use that day's bar and
+earlier bars, not tomorrow's. The set is small on purpose: trailing returns,
+12-minus-1 momentum, 21-day volatility, a volume shock, distance from a
+trailing average, the day's high-low range, and log volume. I winsorize and
+z-score each one across the names on that same day. I do not fit a scaler on
+the whole sample, because then 2018 would know about 2024. The next-day and
+five-day returns are labels. They live in a separate function and a separate
+table, so a select from the feature table cannot see the answer.
+
+The test I would walk through truncates history at a cutoff and rebuilds the
+features. They have to match. A centered moving average fails that test, and
+so does a z-score fit on the full sample. Those failures are in the suite, so
+the check is not a comment."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -405,3 +595,30 @@ in place, including the source and the ingest timestamp. The run log is
 append-only, so I can see that a correction happened. Symbols that were
 requested and produced no valid row are listed on the result; they are not
 silently filled."
+
+### What is lookahead bias, and how do you prevent it here?
+
+"It means a feature dated Monday that used Tuesday's close, and a backtest
+that then treats Monday's trade as if that had been legal. My clock is the
+close. Today's open, high, low, close, adjusted close, and volume are known.
+Tomorrow is not. Labels, which are the forward returns, are computed in a
+different function and stored in a different table.
+
+I don't rely on reading the code. The test cuts the panel off at a date,
+rebuilds the features, and requires every value on or before that date to
+match, including the z-scores. A centered rolling mean and a scaler fit on
+the full sample both fail that test, and the suite asserts that they fail.
+Using today's high is not lookahead under a close-of-day clock. It would be
+lookahead if I claimed the signal was available at the open."
+
+### Why z-score inside the day instead of scaling the whole training set?
+
+"Those are different objects. A within-day z-score says how unusual a name
+is relative to the other names I hold that day, which is what a cross-sectional
+long-short book trades on. A scaler fit on the training window says how
+unusual a value is relative to history. The second one is fine inside a
+walk-forward fold if the fit stops before the test dates. It is not fine fit
+on the whole file. I winsorize at 5 and 95 percent first so one bad print
+does not set the scale, and I use the population standard deviation because
+this is a rescaling, not a volatility estimate. The realized-vol feature uses
+the sample divisor on purpose. They are different jobs."
