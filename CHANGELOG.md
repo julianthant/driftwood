@@ -6,6 +6,20 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
+### Added
+
+- A research agent that proposes `write_report`, `record_note`,
+  `retrain`, or `submit_orders`, then stops. `--approve` is the only way
+  an action runs. The model cannot set that list.
+- A proposal that carries a broker URL or an open-market flag is refused.
+  An approved submit uses the Alpaca paper host only.
+- A daily note rendered by Driftwood, with fixed sections. The model does
+  not write the page. `docs/examples/daily_report.md` is one render of it.
+- `driftwood agent`. The chat model is ChatXAI, default `grok-4`, via
+  `XAI_API_KEY` and `XAI_MODEL`.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added
