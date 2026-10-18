@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "driftwood"
-version = "0.3.0"
+version = "0.4.0"
 description = "A learning-focused quantitative research and paper-trading pipeline for US stocks."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,12 @@ dependencies = [
     "lightgbm>=4.3",
 ]
 
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.build-type = "Release"
+cmake.source-dir = "cpp/sim"
+wheel.packages = ["driftwood"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
@@ -30,10 +36,6 @@ notebook = [
 
 [project.scripts]
 driftwood = "driftwood.cli:cli"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["driftwood*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
