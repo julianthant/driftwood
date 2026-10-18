@@ -11,6 +11,7 @@ from driftwood.backtest.engine import summarize
 from driftwood.backtest.prices import adjusted_ohlc
 from driftwood.cli import main
 from driftwood.data.synthetic import synthetic_bars
+from driftwood.execution import execute_order
 
 
 def test_the_engine_does_not_mention_the_label() -> None:
@@ -29,6 +30,38 @@ def test_adjusted_prices_undo_a_split_in_the_raw_close() -> None:
     assert scaled["close"] == pytest.approx(split["adj_close"])
     assert scaled["open"] == pytest.approx(split["open"] * factor)
     assert scaled["low"] <= scaled["open"] <= scaled["high"]
+
+
+def test_scaling_onto_adj_close_keeps_the_bar_inside_the_fill() -> None:
+    """A close that sits on the raw high can round just outside after scaling.
+
+    These are vendor prints from the research universe. Before the envelope
+    repair, the C++ fill rejected them with "OHLC is inconsistent".
+    """
+
+    bars = pd.DataFrame(
+        {
+            "open": [89.260002, 134.809998],
+            "high": [89.989998, 136.800003],
+            "low": [87.970001, 134.740005],
+            "close": [87.970001, 136.800003],
+            "adj_close": [63.036067962646484, 106.09721374511719],
+        }
+    )
+    adjusted = adjusted_ohlc(bars)
+    for row in adjusted.itertuples(index=False):
+        assert row.low <= row.open <= row.high
+        assert row.low <= row.close <= row.high
+        execute_order(
+            open=row.open,
+            high=row.high,
+            low=row.low,
+            close=row.close,
+            volume=1_000_000,
+            quantity=1,
+            side="buy",
+            algo="immediate",
+        )
 
 
 def test_same_day_jump_is_not_a_profit_and_the_fill_is_the_next_session() -> None:

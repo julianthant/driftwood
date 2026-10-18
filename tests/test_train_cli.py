@@ -1,6 +1,7 @@
 """The train command writes out-of-sample predictions and an IC report, offline."""
 
 import pandas as pd
+import pytest
 
 from driftwood.cli import main
 from driftwood.data.store import MarketStore
@@ -95,6 +96,22 @@ def test_train_before_features_exits_nonzero(tmp_path) -> None:
         ]
     )
     assert code == 1
+
+
+def test_label_horizon_cannot_be_shorter_than_the_label(tmp_path) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "train",
+                "--db",
+                str(tmp_path / "unused.duckdb"),
+                "--label",
+                "fwd_ret_5d",
+                "--label-horizon",
+                "1",
+            ]
+        )
+    assert caught.value.code == 2
 
 
 def test_momentum_model_needs_a_year_and_says_so_on_a_short_book(tmp_path) -> None:
