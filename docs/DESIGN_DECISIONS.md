@@ -76,9 +76,11 @@ drops by roughly the dividend, and the holder is not poorer by that amount.
 
 `adj_close` rewrites history so that percentage changes match the economic
 return of a holder who reinvested dividends and rode through splits. Feature
-math and model labels should use adjusted prices. The raw open, high, low,
-and close stay in the table because they are what the exchange printed, and
-because checking a suspicious return starts by comparing the two series.
+math and model labels should use adjusted prices. The other close stays in
+the table so a suspicious return can be compared with the vendor's second
+series. With current yfinance that second series is already split-adjusted.
+The exchange print from before a split is not in the download. The synthetic
+book is where a raw split is still visible.
 
 The synthetic generator makes this concrete. One symbol is cut 2-for-1 at the
 midpoint. Raw close and volume jump. `adj_close` does not. A test locks that
@@ -187,6 +189,13 @@ If a future vendor frame omits that column, the normalizer copies `close`
 into `adj_close` and warns, rather than inventing an adjustment factor. The
 source string (`yfinance` or `synthetic`) and the ingest timestamp say where
 a number came from.
+
+Current yfinance (the 1.x chart feed, checked against AAPL's 2020 split)
+returns split-adjusted open, high, low, and close even when auto-adjust is
+off. `adj_close` is that series after dividends. The ratio is a dividend
+factor, not a split factor, so a 4-for-1 split does not show up as a raw
+crash. Returns still use `adj_close`. The synthetic generator is what keeps
+a raw split in the file, and the tests lock that path.
 
 The universe used for a run is written to `universe_members` (symbol, name,
 sector). An unknown ticker is stored as sector `Unknown` instead of being
@@ -485,7 +494,11 @@ reject.
 - Survivorship bias, as above. No delistings, no historical index membership.
 - Daily bars only. Nothing in the file can tell you the intraday path.
 - Adjusted close is the vendor's number, not an event-level replay we control.
-  yfinance has had adjustment bugs in the past. The raw close is the check.
+  yfinance has had adjustment bugs in the past. Current yfinance with
+  auto-adjust off still returns split-adjusted OHLC; `adj_close` then
+  differs by dividends. The stored close is not a newspaper print from
+  before a split. The synthetic split is the check that a raw crash is not
+  treated as a return.
 - The synthetic split scales the whole post-split OHLC. It does not model an
   opening auction or a dividend.
 - One writer, one file. There is no locking story for two ingests at once.
@@ -528,10 +541,11 @@ the features are not allowed to see the future.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
 survivorship bias and I say that before quoting any result. I download daily
-bars with yfinance, auto-adjust off, and I store the raw close next to the
-adjusted close. Returns use the adjusted series, so a split is not a crash.
-The raw close is how I check the vendor. Tests use a synthetic book with a
-known 2-for-1 split and never call the network.
+bars with yfinance, auto-adjust off, and I store both closes. On the current
+feed the open, high, low, and close are already split-adjusted, and the
+adjusted close also removes dividends. Returns use the adjusted series.
+Tests use a synthetic book with a known 2-for-1 split, which the vendor feed
+no longer shows as a raw crash, and they never call the network.
 
 Bars are validated and upserted into a local DuckDB file on symbol and date.
 I picked DuckDB over Postgres because this is one researcher and one file,
@@ -564,11 +578,14 @@ smeared across the project."
 ### Why store the raw close and the adjusted close?
 
 "They answer different questions. The adjusted close is the economic series:
-a 2-for-1 split should not look like the stock fell in half. The raw close is
-the print, and it is how I notice a bad adjustment. I force yfinance's
-auto-adjust flag off so the vendor cannot collapse those into one column
-without me seeing it. If the adjusted column is ever missing, I copy the raw
-close and warn, rather than guessing a factor."
+a 2-for-1 split should not look like the stock fell in half. I force
+yfinance's auto-adjust flag off so the vendor cannot collapse the two closes
+into one column without me seeing it. If the adjusted column is ever missing,
+I copy the other close and warn, rather than guessing a factor. On the
+current Yahoo feed those two columns differ by dividends. The open, high,
+low, and close are already split-adjusted, so I do not pretend the stored
+close is the print from the paper. The synthetic book is where I show a raw
+split, and that is the test."
 
 ### Does this backtest have survivorship bias?
 
