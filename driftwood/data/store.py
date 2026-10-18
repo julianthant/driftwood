@@ -212,6 +212,21 @@ class MarketStore:
             """
         ).df()
 
+    def execute(self, sql: str, params: list[object] | None = None):
+        """Run SQL against this file. Parameters are bound, never interpolated."""
+
+        if params is None:
+            return self._con.execute(sql)
+        return self._con.execute(sql, params)
+
+    def register_frame(self, name: str, frame: pd.DataFrame) -> None:
+        if not name.isidentifier():
+            raise ValueError(f"Refusing to register a frame as {name!r}")
+        self._con.register(name, frame)
+
+    def unregister_frame(self, name: str) -> None:
+        self._con.unregister(name)
+
     def latest_date(self) -> date | None:
         row = self._con.execute("SELECT MAX(date) FROM bars").fetchone()
         if row is None or row[0] is None:
