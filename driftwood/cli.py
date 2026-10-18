@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
+from driftwood.attribution import attribute_store, write_attribution_report
 from driftwood.backtest import BacktestConfig, run_backtest, write_backtest_report
 from driftwood.config import database_path, load_env
 from driftwood.data.ingest import ingest_synthetic, ingest_yfinance
@@ -15,6 +17,14 @@ from driftwood.data.yfinance import DataUnavailable
 from driftwood.features.factors import MODEL_FEATURES
 from driftwood.features.persist import read_features, write_research_tables
 from driftwood.features.pipeline import build_research_frame
+from driftwood.live.broker import make_paper_client
+from driftwood.live.run import (
+    MarketOpenError,
+    PaperPlan,
+    broker_equity_and_positions,
+    plan_from_store,
+    submit_plan,
+)
 from driftwood.models.ic import information_coefficient, summarize_ic
 from driftwood.models.persist import read_predictions
 from driftwood.models.train import horizon_for_label, train_store
@@ -152,6 +162,45 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for the comparison. Omit to print the summary only.",
     )
 
+    paper = sub.add_parser(
+        "paper",
+        help="Preview next-session paper orders. Nothing is sent unless --submit is set",
+    )
+    paper.add_argument("--db", default=None, help="DuckDB file. Defaults to DRIFTWOOD_DB or data/")
+    paper.add_argument("--model", default="ridge", help="Prediction model name to trade")
+    paper.add_argument("--capital", type=float, default=1_000_000.0)
+    paper.add_argument("--gross", type=float, default=1.0)
+    paper.add_argument("--max-weight", type=float, default=0.1)
+    paper.add_argument("--min-trade-dollars", type=float, default=0.0)
+    paper.add_argument(
+        "--submit",
+        action="store_true",
+        help="Send DAY market orders to the Alpaca paper host. Off by default.",
+    )
+    paper.add_argument(
+        "--allow-while-open",
+        action="store_true",
+        help="Send even if the paper market is open. A DAY order would then fill today.",
+    )
+
+    attribute = sub.add_parser(
+        "attribute",
+        help="Split the last scored close-to-close return across signals",
+    )
+    attribute.add_argument(
+        "--db",
+        default=None,
+        help="DuckDB file. Defaults to DRIFTWOOD_DB or data/",
+    )
+    attribute.add_argument("--model", default="ridge")
+    attribute.add_argument("--gross", type=float, default=1.0)
+    attribute.add_argument("--max-weight", type=float, default=0.1)
+    attribute.add_argument(
+        "--report",
+        default=None,
+        help="Directory for the attribution note. Omit to print the table only.",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.command == "ingest":
@@ -162,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
         return _train(parser, args)
     if args.command == "backtest":
         return _backtest(args)
+    if args.command == "paper":
+        return _paper(args)
+    if args.command == "attribute":
+        return _attribute(args)
     parser.error(f"Unknown command {args.command}")
     return 2
 
@@ -325,6 +378,99 @@ def _backtest(args: argparse.Namespace) -> int:
         print(f"report: {report}")
     print(f"database: {path}")
     return 0
+
+
+def _paper(args: argparse.Namespace) -> int:
+    path = database_path(args.db)
+    try:
+        with MarketStore(path) as store:
+            plan = plan_from_store(
+                store,
+                model=args.model,
+                equity=args.capital,
+                gross=args.gross,
+                max_weight=args.max_weight,
+                min_trade_dollars=args.min_trade_dollars,
+            )
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not args.submit:
+        _print_plan("dry-run", plan)
+        print(f"database: {path}")
+        return 0
+    api_key = os.environ.get("ALPACA_API_KEY", "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret_key:
+        print(
+            "ALPACA_API_KEY and ALPACA_SECRET_KEY are required to submit",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        client = make_paper_client(api_key, secret_key, url=os.environ.get("ALPACA_BASE_URL"))
+        _refuse_if_open(client, allow_while_open=args.allow_while_open)
+        equity, positions = broker_equity_and_positions(client)
+        with MarketStore(path) as store:
+            plan = plan_from_store(
+                store,
+                model=args.model,
+                equity=equity,
+                positions=positions,
+                gross=args.gross,
+                max_weight=args.max_weight,
+                min_trade_dollars=args.min_trade_dollars,
+            )
+        submit_plan(client, plan.orders, allow_while_open=args.allow_while_open)
+    except (MarketOpenError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    _print_plan("submitted", plan)
+    print(f"database: {path}")
+    return 0
+
+
+def _attribute(args: argparse.Namespace) -> int:
+    path = database_path(args.db)
+    try:
+        with MarketStore(path) as store:
+            result = attribute_store(
+                store,
+                model=args.model,
+                gross=args.gross,
+                max_weight=args.max_weight,
+            )
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(
+        f"signal {result.signal_date.date()} -> {result.next_date.date()}, "
+        f"close-to-close {result.portfolio_return:.6f}"
+    )
+    print(result.note)
+    print(result.by_signal.to_string(index=False))
+    print("Contributions sum to the target book's close-to-close return.")
+    print("They are not the filled equity-curve return.")
+    if args.report:
+        report = write_attribution_report(result, Path(args.report))
+        print(f"report: {report}")
+    print(f"database: {path}")
+    return 0
+
+
+def _print_plan(kind: str, plan: PaperPlan) -> None:
+    print(f"{kind}: {len(plan.orders)} orders for signal {plan.signal_date.date()}")
+    for order in plan.orders:
+        print(f"{order.symbol} {order.side} {order.quantity:.6f}")
+
+
+def _refuse_if_open(client: object, *, allow_while_open: bool) -> None:
+    clock = client.get_clock()
+    if bool(getattr(clock, "is_open", False)) and not allow_while_open:
+        raise MarketOpenError(
+            "The paper market is open. A DAY order would fill this session, "
+            "and the signal was the prior close. Pass --allow-while-open to send anyway."
+        )
 
 
 def _format_ic(value: object) -> str:

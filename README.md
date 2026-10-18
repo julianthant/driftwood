@@ -16,7 +16,7 @@ paper trade, and explain each day's result by signal.
 | 3 | Baseline model, walk-forward validation, information coefficient | Done |
 | 4 | C++17 execution simulator, costs, and fill tests | Done |
 | 5 | Backtest and immediate vs TWAP vs VWAP | Done |
-| 6 | Alpaca paper trading, signal attribution, Streamlit dashboard | Not started |
+| 6 | Alpaca paper trading, signal attribution, Streamlit dashboard | Done |
 | 7 | Research agent with a human approval gate and a daily report | Not started |
 
 Initial scope: 50 liquid US stocks, daily bars, about 10 years of history.
@@ -93,7 +93,8 @@ square-root impact: a coefficient, times a volatility the caller already
 knew, times the square root of the fraction of the bin the order took.
 Commission is per share and shows up in cash, not in the price. A round
 trip of the same schedule loses the spread. The impact coefficient is not
-a fitted Almgren-Chriss model. Nothing here is a portfolio backtest yet.
+a fitted Almgren-Chriss model. The backtest calls this fill. The paper
+command does not: a paper ticket is a DAY market order at the broker.
 
 **Next-session backtest.** The score on the close of day `t` is turned into
 target weights with that close. The order is filled on day `t+1`. The
@@ -119,8 +120,24 @@ equity. The cost column is the spread, the impact, and the commission. It
 is not the market's move. Immediate, TWAP, and VWAP are run on the same
 targets so the difference is the schedule, not a different portfolio.
 
-Performance attribution is a later milestone. Its explanation will land
-here with the code that uses it.
+**Paper trading.** `driftwood paper` turns the latest stored score into
+share deltas for the next session, using the same weights as the backtest
+and the signal date's adjusted close. The default is a dry run: it prints
+the orders and does not construct a broker client, so it needs no API key.
+`--submit` sends DAY market orders, and only to
+`https://paper-api.alpaca.markets`. Any other host is refused before a
+client exists. Submit also reads the paper account's equity and positions
+and plans again, and it refuses to send while that market is open, because
+a DAY order would fill the session that produced the signal.
+
+**Attribution.** One name's contribution is its target weight times the
+next session's adjusted return. That contribution is split across signals
+in proportion to exposure, and exposure is the latest fold's coefficient
+times the signal-date z-score. A name with a weight and no exposure total
+is called `unattributed`. The rows add up to the target book's
+close-to-close return. That sum is not the filled equity curve: costs and
+the intraday fill stay in the backtest report. The dashboard draws this
+table and does not send orders.
 
 ## Local setup
 
@@ -255,6 +272,36 @@ a trained model first, with the walk-forward windows shrunk, and
 `--max-weight` raised if only a few names are in the file. The default cap
 of 0.1 cannot build a gross of 1 out of two names.
 
+Preview the paper orders for that same book. This does not contact Alpaca:
+
+```bash
+driftwood paper --db data/driftwood.duckdb --max-weight 0.5
+```
+
+To send those orders to the paper account, export `ALPACA_API_KEY` and
+`ALPACA_SECRET_KEY` and add `--submit`. The command re-reads equity and
+positions before it sends, and it will not send while the paper market is
+open unless you also pass `--allow-while-open`. It will not use any host
+other than `https://paper-api.alpaca.markets`.
+
+Attribute the last scored session that already has a next bar:
+
+```bash
+driftwood attribute --db data/driftwood.duckdb --max-weight 0.5 \
+  --report reports/attribution
+```
+
+The markdown says the contributions sum to the target close-to-close
+return and are not the filled equity-curve return. Training writes the
+coefficients used as betas. If that table is missing, each z-score is
+used with a beta of 1 and the command says so.
+
+The dashboard is a view of the same file. It does not send orders:
+
+```bash
+streamlit run dashboard/app.py
+```
+
 Then open the notebook from the repository root:
 
 ```bash
@@ -286,18 +333,22 @@ would have been asked for unadjusted prices.
 | `driftwood/portfolio/` | Dollar-neutral weights from one day's scores |
 | `driftwood/backtest/` | Next-session backtest and the schedule comparison |
 | `cpp/sim/` | C++17 path, TWAP/VWAP schedule, participation cap, and costs |
-| `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest` |
+| `driftwood/live/` | Paper-only order plan. Dry-run does not construct a client |
+| `driftwood/attribution/` | Close-to-close split of the target book across signals |
+| `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest`, `paper`, `attribute` |
+| `dashboard/` | Read-only Streamlit page. It does not send orders |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
 | `docs/DESIGN_DECISIONS.md` | Interview study guide and the decision log |
 | `data/`, `artifacts/`, `reports/`, `logs/` | Local outputs, not committed |
 
-Planned packages that are not created yet: `live`, `attribution`, and
-`agent`. The Streamlit app will live in `dashboard/`.
+The research agent is not built yet. It will live in `driftwood/agent/`.
 
 ## Credentials
 
-Nothing in this milestone needs a key. `.env.example` lists the variables
-later stages will read (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `XAI_API_KEY`,
-`XAI_MODEL`). Real values stay in `.env` or the shell. The paper-trading
-stage will refuse any host other than `paper-api.alpaca.markets`.
+A dry run needs no keys. `driftwood paper --submit` reads `ALPACA_API_KEY`
+and `ALPACA_SECRET_KEY` from the environment. Copy `.env.example` to `.env`
+for local values. `.env` is gitignored. The client refuses any host other
+than `https://paper-api.alpaca.markets`. `XAI_API_KEY` and `XAI_MODEL` are
+listed for the research agent and are not read yet. Tests do not need keys
+and do not call Alpaca.

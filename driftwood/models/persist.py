@@ -58,6 +58,70 @@ def write_predictions(
     return int(len(payload))
 
 
+def write_coefficients(
+    store: MarketStore,
+    weights: pd.DataFrame,
+    *,
+    model_name: str,
+) -> int:
+    """Replace one model's fold coefficients. Other models stay in the table."""
+
+    payload = weights.loc[:, ["fold", "feature", "weight"]].copy()
+    payload["model"] = model_name
+    payload["fold"] = payload["fold"].astype(int)
+    payload["feature"] = payload["feature"].astype(str)
+    payload["weight"] = payload["weight"].astype(float)
+    store.execute("BEGIN")
+    try:
+        store.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coefficients (
+                model VARCHAR NOT NULL,
+                fold INTEGER NOT NULL,
+                feature VARCHAR NOT NULL,
+                weight DOUBLE,
+                PRIMARY KEY (model, fold, feature)
+            )
+            """
+        )
+        store.execute("DELETE FROM coefficients WHERE model = ?", [model_name])
+        if not payload.empty:
+            store.register_frame("_incoming_coefficients", payload)
+            store.execute(
+                """
+                INSERT INTO coefficients (model, fold, feature, weight)
+                SELECT model, fold, feature, weight
+                FROM _incoming_coefficients
+                """
+            )
+        store.execute("COMMIT")
+    except Exception:
+        store.execute("ROLLBACK")
+        raise
+    finally:
+        store.unregister_frame("_incoming_coefficients")
+    return int(len(payload))
+
+
+def read_coefficients(store: MarketStore, model: str | None = None) -> pd.DataFrame:
+    try:
+        frame = store.execute(
+            """
+            SELECT model, fold, feature, weight
+            FROM coefficients
+            ORDER BY model, fold, feature
+            """
+        ).df()
+    except Exception as exc:
+        message = str(exc).lower()
+        if "does not exist" in message or "not found" in message:
+            raise RuntimeError("No coefficients table. Run `driftwood train` first.") from exc
+        raise
+    if model is not None and not frame.empty:
+        frame = frame.loc[frame["model"] == model].reset_index(drop=True)
+    return frame
+
+
 def read_predictions(store: MarketStore) -> pd.DataFrame:
     try:
         frame = store.execute(
