@@ -15,7 +15,7 @@ paper trade, and explain each day's result by signal.
 | 2 | Features, with tests that future data cannot leak in | Done |
 | 3 | Baseline model, walk-forward validation, information coefficient | Done |
 | 4 | C++17 execution simulator, costs, and fill tests | Done |
-| 5 | Backtest and immediate vs TWAP vs VWAP | Not started |
+| 5 | Backtest and immediate vs TWAP vs VWAP | Done |
 | 6 | Alpaca paper trading, signal attribution, Streamlit dashboard | Not started |
 | 7 | Research agent with a human approval gate and a daily report | Not started |
 
@@ -94,6 +94,30 @@ knew, times the square root of the fraction of the bin the order took.
 Commission is per share and shows up in cash, not in the price. A round
 trip of the same schedule loses the spread. The impact coefficient is not
 a fitted Almgren-Chriss model. Nothing here is a portfolio backtest yet.
+
+**Next-session backtest.** The score on the close of day `t` is turned into
+target weights with that close. The order is filled on day `t+1`. The
+return that already happened, from the previous close to today's close, is
+marked before the new order exists. It is not a profit of today's score.
+Prices in the backtest are adjusted: the raw open, high, and low are scaled
+by `adj_close / close`, so a split is not a crash. The volatility handed to
+the fill is the one stored on the signal date, not the fill date.
+
+**Dollar-neutral weights.** Each name's score is compared with the average
+score that day. Names above the average are long, names below it are short.
+The weights aim at a gross exposure (the sum of absolute weights) and no
+single name can exceed a cap. The cap is applied once. If it binds, the
+book can finish below the gross target, and the dollars long and short can
+stop matching. That is preferred to a loop that quietly breaks the cap.
+
+**Sharpe, drawdown, turnover.** The Sharpe ratio here is the mean daily
+return divided by the standard deviation of daily returns, times the square
+root of 252, with a risk-free rate of zero. It is not a promise about the
+future. Max drawdown is the worst peak-to-trough loss on the equity curve,
+stored as a negative number. Turnover is the dollars traded divided by
+equity. The cost column is the spread, the impact, and the commission. It
+is not the market's move. Immediate, TWAP, and VWAP are run on the same
+targets so the difference is the schedule, not a different portfolio.
 
 Performance attribution is a later milestone. Its explanation will land
 here with the code that uses it.
@@ -217,6 +241,20 @@ print(fill.filled, fill.fill_vwap, fill.cash)
 a buy is negative. `fill.unfilled` is what the participation cap could not
 take by the close.
 
+Compare the three schedules on the stored predictions. The command trades
+the `prediction` column. It does not trade the stored label. Sigma is
+`vol_21` from the feature table, from the signal date:
+
+```bash
+driftwood backtest --db data/driftwood.duckdb --report reports/backtest
+```
+
+The note in `reports/backtest.md` has total return, Sharpe, max drawdown,
+average turnover, and cost for each schedule. A short synthetic file needs
+a trained model first, with the walk-forward windows shrunk, and
+`--max-weight` raised if only a few names are in the file. The default cap
+of 0.1 cannot build a gross of 1 out of two names.
+
 Then open the notebook from the repository root:
 
 ```bash
@@ -245,15 +283,17 @@ would have been asked for unadjusted prices.
 | `driftwood/features/` | Close-of-day features, forward labels, and the truncation check |
 | `driftwood/models/` | Walk-forward models, the information coefficient, and the IC report |
 | `driftwood/execution.py` | Thin call into the C++ fill. No second implementation of the price |
+| `driftwood/portfolio/` | Dollar-neutral weights from one day's scores |
+| `driftwood/backtest/` | Next-session backtest and the schedule comparison |
 | `cpp/sim/` | C++17 path, TWAP/VWAP schedule, participation cap, and costs |
-| `driftwood/cli.py` | `driftwood ingest`, `driftwood features`, `driftwood train` |
+| `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest` |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
 | `docs/DESIGN_DECISIONS.md` | Interview study guide and the decision log |
 | `data/`, `artifacts/`, `reports/`, `logs/` | Local outputs, not committed |
 
-Planned packages that are not created yet: `portfolio`, `backtest`, `live`,
-`attribution`, and `agent`. The Streamlit app will live in `dashboard/`.
+Planned packages that are not created yet: `live`, `attribution`, and
+`agent`. The Streamlit app will live in `dashboard/`.
 
 ## Credentials
 
