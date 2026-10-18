@@ -983,7 +983,10 @@ targets. They do not share a participation cap.
 with no bar on the fill date does not trade that day and keeps its last
 mark. Partial fills leave the book short of the target until the next
 score, which may be the next day and may not. Adjusted high and low are
-the raw bar times `adj_close / close`, not a vendor-adjusted range. Volume
+the raw bar times `adj_close / close`, not a vendor-adjusted range. Close is
+then set to `adj_close`. That assignment can leave the close one rounding
+error outside the scaled high or low, which the fill rejects, so high and
+low are expanded just enough to contain the open and the close. Volume
 is unadjusted relative to that price, so on a split day the participation
 cap and the economic price are in different units. Sigma is whatever
 `vol_21` said on the signal date. If that cell is missing, the fill gets
@@ -1107,9 +1110,10 @@ this file.
 - After the weight cap, the book can be net long or net short, and it can
   hold less than the gross target. With a handful of names the default
   10 percent cap cannot reach a gross of 1.
-- Adjusted high and low are the raw bar scaled by `adj_close / close`.
-  On a split day that price and the stored volume are not in the same
-  units, so the participation cap is only approximately economic.
+- Adjusted high and low are the raw bar scaled by `adj_close / close`,
+  then expanded by at most a rounding error so they still contain the open
+  and the close. On a split day that price and the stored volume are not in
+  the same units, so the participation cap is only approximately economic.
 - Unfilled size is abandoned until the next score. It is not a resting
   order. Orders generated on the last close of the file never fill.
 - The three schedules do not see each other's participation. A day when
