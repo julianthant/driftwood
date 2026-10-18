@@ -31,10 +31,12 @@ of shares traded (volume). Driftwood stores one row per symbol per day.
 
 **Adjusted close.** A split or a dividend changes the raw close without
 changing the economic value of a holding. `adj_close` is the vendor's close
-after those adjustments. Use it for returns. Keep the raw close so you can
-see what the adjustment did. The synthetic book includes a 2-for-1 split in
-one name for exactly this comparison: the raw return on the split day is
-about -50%, and the adjusted return is an ordinary day.
+after those adjustments. Use it for returns. Keep the other close so you can
+see what the adjustment did. Current yfinance, with auto-adjust off, already
+returns split-adjusted open, high, low, and close; `adj_close` then differs
+by dividends, not by the split. The synthetic book includes a 2-for-1 split
+in one name so the raw crash is still visible: the raw return on the split
+day is about -50%, and the adjusted return is an ordinary day.
 
 **Survivorship bias.** The universe is today's liquid large caps, not the
 list of stocks that were in the S&P 500 on each historical date. Names that
