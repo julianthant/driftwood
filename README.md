@@ -159,6 +159,13 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
+On macOS, the LightGBM wheel links OpenMP and does not ship it. Install
+that library before the package, or `import lightgbm` fails:
+
+```bash
+brew install libomp
+```
+
 An editable install imports the source tree, so edits apply without
 reinstalling. Copy `.env.example` to `.env` if you want a local database path
 or, later, API keys. Tests do not read that file and do not need keys.
