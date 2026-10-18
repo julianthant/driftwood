@@ -6,6 +6,46 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+### Added
+
+- Six read-only dashboard pages: Overview, Backtest, Execution,
+  Model / Signals, Attribution, and Data, with native Streamlit controls,
+  interactive Plotly charts, a light navy and teal theme, and CLI recovery
+  commands for empty or stale studies.
+- Per-model DuckDB backtest snapshots with daily equity, returns, costs,
+  turnover, summary, configuration, timestamp, and an input signature.
+  CLI backtests save these even without `--report`; reruns replace that
+  model's schedule set and preserve other models.
+- Stored prediction label metadata for horizon-aware IC diagnostics.
+
+### Changed
+
+- Dashboard captions and controls are shorter, with Database path and Refresh
+  data in collapsed Settings. Charts are full-width at 300px; model diagnostics
+  use Distribution, Cumulative IC and Coefficients tabs after daily IC.
+- Schedule colors are teal for Immediate, orange for TWAP and slate for VWAP,
+  retaining solid, dashed and dotted lines. Numeric precision is consistent,
+  attribution uses one decimal place in bps, and the client toolbar is hidden.
+- Equal finite realized cost rates appear once within a 1e-6 bps noise
+  tolerance; USD costs remain visible and differing rates retain separate bars.
+  Shared rates identify spread-only runs when impact and commission are zero.
+- Dashboard model selection starts with saved backtests and prefers ridge
+  within each availability group. Schedule comparisons use consistent labels,
+  colors, and line styles, with separate performance and cost panels.
+- Execution costs show USD, basis points of actual traded notional, and
+  cumulative differences from Immediate. Zero traded notional leaves cost
+  bps missing; large currency KPIs use compact labels.
+- Signal labels, coefficient units, and attribution totals are clearer.
+  Coverage tables use dates without times; complete coverage replaces the
+  heatmap with "No missing symbol-days", and partial heatmaps show affected
+  symbols only.
+- Dashboard reads use bounded memory caches with a five-minute expiry,
+  database and WAL revision keys, and a manual Refresh data control.
+- Corrected bars, model scores, or signal-date volatility require a fresh
+  backtest before the dashboard displays its saved results.
+- Runtime dependencies include Plotly 5.18 or newer and Streamlit 1.51 or
+  newer.
+
 ## [0.7.0] - 2026-10-18
 
 ### Added

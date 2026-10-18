@@ -1,0 +1,17 @@
+/* Streamlit owns control behavior and responsive stacking. */
+.block-container { max-width: 1440px; padding: 2rem 2.5rem 2.5rem; }
+h1 { font-size: 2.25rem; letter-spacing: -0.025em; font-weight: 650; }
+h2, h3 { letter-spacing: -0.015em; }
+[data-testid="stMetric"] {
+    background: #ffffff; border: 1px solid #dce4ef; border-radius: 8px;
+    padding: 0.85rem 1rem; min-height: 100px; font-variant-numeric: tabular-nums;
+}
+[data-testid="stMetricValue"] { font-size: clamp(1.15rem, 2vw, 1.8rem); }
+[data-testid="stMetricLabel"] { color: #465b76; }
+[data-testid="stSidebar"] { border-right: 1px solid #dce4ef; }
+[data-testid="stSidebar"] h1 { font-size: 1.85rem; letter-spacing: -0.04em; }
+[data-testid="stToolbar"] { display: none; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color: #465b76; }
+[data-testid="stCaptionContainer"] { opacity: 1; }
+[data-testid="stPlotlyChart"] { border-radius: 8px; background: #ffffff; }
+@media (max-width: 640px) { .block-container { padding: 1.5rem 1rem; } }

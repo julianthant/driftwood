@@ -40,6 +40,12 @@ def write_predictions(
         )
         # A second model is a comparison, not a replacement of the first one.
         store.execute("DELETE FROM predictions WHERE model = ?", [model_name])
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS model_metadata "
+            "(model VARCHAR PRIMARY KEY, label_column VARCHAR NOT NULL)"
+        )
+        store.execute("DELETE FROM model_metadata WHERE model = ?", [model_name])
+        store.execute("INSERT INTO model_metadata VALUES (?, ?)", [model_name, label_column])
         if not payload.empty:
             store.register_frame("_incoming_predictions", payload)
             store.execute(

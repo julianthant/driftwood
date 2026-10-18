@@ -121,8 +121,9 @@ Commands:
   host. A dry run does not need API keys.
 - `driftwood attribute` splits the last scored close-to-close return
   across signals. The note says that sum is not the filled equity curve.
-- `streamlit run dashboard/app.py` draws coverage and that attribution.
-  The page has no order button.
+- `streamlit run dashboard/app.py` opens six research pages for coverage,
+  saved backtests, execution comparisons, model quality, and attribution.
+  The app opens the study read-only and has no order button. See ADR-024.
 - `driftwood agent` reads the study file, asks the chat model for a JSON
   list of proposals, and stops before any action. `--approve` is the only
   way an action runs. The model cannot set that list.
@@ -1246,6 +1247,98 @@ reason, quoted, and it is labeled as such.
 without reading every sentence. The example in `docs/examples/` is the
 same function a run uses, so I am not maintaining a second template.
 
+### ADR-024 — A read-only research workbench over saved backtests
+
+**Context.** Coverage and a contribution table do not show whether a model's
+ranking survives execution costs. Running the simulator on a page rerun
+would slow navigation and make the displayed result depend on hidden UI
+state. Older CSV reports also lack a shared database record of the run.
+
+**Decision.** Provide six Streamlit pages: Overview, Backtest, Execution,
+Model / Signals, Attribution, and Data. Use native controls and interactive
+Plotly charts with a light navy and teal theme. The sidebar selects the
+study file, model, and, on Backtest, schedule. Every query opens
+`MarketStore` with `read_only=True`; the dashboard requires no credentials.
+This extends ADR-021's read-only boundary.
+
+The CLI always saves `backtest_daily`, `backtest_summary`, and
+`backtest_runs`, including daily equity, returns, costs, turnover, run
+configuration, timestamp, and input signature. Each run atomically replaces
+one model's complete schedule set and leaves other models in place.
+`--report` remains optional CSV and Markdown output. The signature covers
+bars, that model's scores, and `vol_21`, so corrected inputs trigger a
+rerun instruction instead of a stale chart.
+
+Memory-only caches expire after 300 seconds, have bounded entries, and
+include the path, model where relevant, and database and WAL revisions in
+the key. Refresh data clears them. Empty or partial studies show CLI
+recovery commands. A concurrent CLI writer must stop before a reader can
+recover from a DuckDB lock conflict.
+
+Model quality and attribution reuse the research library. Training stores
+`label_column` in `model_metadata` so IC uses one or five Newey-West lags.
+Legacy predictions without that metadata use an explicitly labeled
+five-lag allowance. Rolling IC needs a full 63-session valid window, and
+cumulative IC is a sum. Attribution uses the latest eligible next-close
+session with gross 1.0 and a 10% weight cap, excludes execution costs, and
+needs no report file. Coverage includes requested names without bars;
+monthly missing fractions use the union of observed dates.
+
+**Alternatives.** Parse CSV reports, rerun the simulator in the UI, or build
+a separate web service. CSV parsing loses the shared run contract. UI
+simulation makes navigation expensive. A service adds deployment and API
+work before this local research workflow needs either.
+
+**Tradeoff.** Only the latest backtest per model is retained. Existing CSV
+reports need one CLI rerun to populate the snapshot tables. File revisions
+invalidate cached reads, but DuckDB still limits concurrent writers and
+readers across processes. Coverage cannot detect dates absent for every
+symbol, and synthetic charts are demonstrations rather than trading evidence.
+
+**Why this one.** The CLI owns simulation and persistence; the dashboard
+explains the saved result using the same accounting and diagnostics.
+Researchers can inspect signal quality, filled returns, costs, and data
+gaps without a second simulator or a broker connection.
+
+### ADR-025 — Compact research pages and shared realized cost rates
+
+**Context.** Long explanations compete with charts in a dashboard demonstration.
+Identical cost-rate bars add no comparison, while tiny differences can reflect
+floating-point summation. The saved study can have equal bps costs but different
+USD costs because schedules trade different notionals.
+
+**Decision.** Keep the six native Streamlit pages with short captions, equal-height
+KPI cards and full-width 300px charts. Put Distribution, Cumulative IC and
+Coefficients in tabs after daily IC. Move pipeline explanations and research
+caveats to the README. Keep source and simulation status in the sidebar, with
+Database path and Refresh data in collapsed Settings below Model and Schedule.
+Use minimal toolbar mode and hide `stToolbar` while preserving sidebar collapse.
+
+Use Immediate in solid teal, TWAP in dashed orange and VWAP in dotted slate.
+Apply compact currency and consistent numeric precision without changing raw data.
+Attribution retains every signal row and Total with one decimal place in bps.
+
+A shared helper collapses finite realized cost rates to one value only when each
+is within 1e-6 bps of the first, with zero relative tolerance. This allowance
+covers floating-point summation noise. Missing or nonfinite rates do not collapse;
+differing rates retain separate bars. USD cost bars remain, and zero traded
+notional leaves cost bps missing. Zero impact and commission identify a shared
+rate as spread only. Cumulative cost differences retain Immediate as a labeled
+zero reference, without a separate Immediate trace. The simulator, persistence
+contract and read-only boundary in ADR-024 remain unchanged.
+
+**Alternatives.** Retain paragraph captions and all equal-rate bars, or collapse
+rates after rounding them to the display precision. Paragraphs reduce room for
+analysis. Rounding could hide meaningful differences between realized rates.
+
+**Tradeoff.** Readers use the README for detailed accounting and limitations.
+Compact hovers show less precision than the underlying data. The strict shared
+rate tolerance avoids suppressing differences merely because labels look equal.
+
+**Why this one.** The pages emphasize comparison while retaining USD differences,
+raw values and explicit units. Documentation keeps the research assumptions
+available without repeating them beside every chart.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -1674,7 +1767,8 @@ order. The views are plain dataframes, and importing them does not import
 the UI runtime or the broker. The app source has no submit call. If I
 want an order to leave, I run `driftwood paper --submit` in a terminal,
 with the paper keys set, and I read the symbols and quantities it prints.
-The page can show me the preview. It cannot click it for me."
+The dashboard shows signals, simulated costs, and contributions. It does
+not submit the orders."
 
 ### How does the agent get human approval?
 

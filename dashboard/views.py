@@ -6,6 +6,8 @@ draws these frames is not allowed to send an order.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 
@@ -31,7 +33,11 @@ def coverage_table(bars: pd.DataFrame) -> pd.DataFrame:
 def attribution_table(contributions: pd.DataFrame) -> pd.DataFrame:
     """Signal contributions plus a total row. The total is the book's return."""
 
-    frame = contributions.loc[:, ["signal", "contribution"]].copy()
+    frame = (
+        contributions.loc[:, ["signal", "contribution"]]
+        .sort_values("contribution", kind="stable")
+        .copy()
+    )
     total = float(frame["contribution"].sum()) if not frame.empty else 0.0
     extra = pd.DataFrame([{"signal": "total", "contribution": total}])
     return pd.concat([frame, extra], ignore_index=True)
@@ -44,3 +50,67 @@ def orders_table(orders: pd.DataFrame) -> pd.DataFrame:
     if orders.empty:
         return pd.DataFrame(columns=columns)
     return orders.loc[:, columns].reset_index(drop=True)
+
+
+def backtest_series(daily: pd.DataFrame) -> pd.DataFrame:
+    """Add normalized equity, underwater drawdown and accumulated fill costs."""
+    frame = daily.sort_values(["algo", "date"]).copy()
+    grouped = frame.groupby("algo", sort=False)
+    frame["growth"] = frame["equity"] / grouped["equity"].transform("first")
+    frame["drawdown"] = frame["equity"] / grouped["equity"].cummax() - 1.0
+    frame["cumulative_cost"] = grouped["cost"].cumsum()
+    return frame
+
+
+def ic_series(daily: pd.DataFrame, window: int = 63) -> pd.DataFrame:
+    """A full-window rolling mean; undefined ICs stay missing, including in the sum."""
+    frame = daily.sort_values("date").copy()
+    frame["rolling_ic"] = frame["ic"].rolling(window, min_periods=window).mean()
+    frame["cumulative_ic"] = frame["ic"].cumsum()
+    return frame
+
+
+def missing_by_month(dates: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    """Missing fraction relative to sessions observed anywhere in this database."""
+    frame = dates.loc[:, ["symbol", "date"]].drop_duplicates().copy()
+    frame["month"] = pd.to_datetime(frame["date"]).dt.to_period("M").dt.to_timestamp()
+    sessions = frame.drop_duplicates("date").groupby("month").size()
+    counts = frame.groupby(["symbol", "month"]).size().unstack("month")
+    counts = counts.reindex(index=symbols, columns=sessions.index).fillna(0)
+    return 1.0 - counts.div(sessions, axis="columns")
+
+
+def model_order(models: tuple[str, ...], backtested: tuple[str, ...]) -> tuple[str, ...]:
+    """Start on an existing backtest, preferring ridge within each availability group."""
+    saved = set(backtested)
+    return tuple(sorted(models, key=lambda model: (model not in saved, model != "ridge", model)))
+
+
+def execution_summary(summary: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    """Cost in basis points uses actual raw traded notional, never starting capital."""
+    notional = daily.groupby("algo")["traded_notional"].sum().rename("total_traded_notional")
+    frame = summary.merge(notional, on="algo", how="left", validate="one_to_one")
+    denominator = frame["total_traded_notional"].where(frame["total_traded_notional"] > 0)
+    frame["cost_bps"] = frame["total_cost"] / denominator * 10_000
+    return frame
+
+
+def shared_cost_bps(summary: pd.DataFrame) -> float | None:
+    """Collapse equal realized rates, allowing only floating-point summation noise."""
+    rates = summary["cost_bps"].tolist()
+    if not rates or not all(math.isfinite(rate) for rate in rates):
+        return None
+    first = float(rates[0])
+    if all(math.isclose(rate, first, rel_tol=0, abs_tol=1e-6) for rate in rates):
+        return first
+    return None
+
+
+def relative_costs(daily: pd.DataFrame) -> pd.DataFrame:
+    """Match each schedule's cumulative fill cost to Immediate on the same session."""
+    baseline = daily.loc[daily["algo"] == "immediate", ["date", "cumulative_cost"]]
+    baseline = baseline.rename(columns={"cumulative_cost": "immediate_cost"})
+    others = daily.loc[daily["algo"] != "immediate", ["algo", "date", "cumulative_cost"]]
+    frame = others.merge(baseline, on="date", how="inner", validate="many_to_one")
+    frame["cost_difference"] = frame["cumulative_cost"] - frame["immediate_cost"]
+    return frame

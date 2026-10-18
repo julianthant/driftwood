@@ -136,8 +136,8 @@ in proportion to exposure, and exposure is the latest fold's coefficient
 times the signal-date z-score. A name with a weight and no exposure total
 is called `unattributed`. The rows add up to the target book's
 close-to-close return. That sum is not the filled equity curve: costs and
-the intraday fill stay in the backtest report. The dashboard draws this
-table and does not send orders.
+the intraday fill stay in the backtest report. The dashboard shows these
+contributions alongside the saved backtest. It does not send orders.
 
 **Research agent.** `driftwood agent` reads the study file and asks a chat
 model for a short list of actions: write the daily note, record a note,
@@ -188,6 +188,99 @@ The notebook's charts need matplotlib, which is optional:
 python -m pip install -e ".[notebook]"
 ```
 
+## Review a study in the dashboard
+
+From the repository root, launch the read-only research workbench:
+
+```bash
+streamlit run dashboard/app.py
+```
+
+The six pages use native Streamlit controls and interactive Plotly charts
+with a light navy and teal theme:
+
+| Page | What you can review |
+| --- | --- |
+| Overview | Study coverage, signal metrics, and normalized equity |
+| Backtest | One schedule's equity, drawdown, saved assumptions, and daily ledger |
+| Execution | Immediate, TWAP, and VWAP performance, turnover, USD and bps costs, and cumulative cost differences |
+| Model / Signals | Daily and rolling IC, with Distribution, Cumulative IC, and Coefficients tabs |
+| Attribution | The latest eligible session's signal contributions and their total |
+| Data | Symbol coverage and monthly missing-observation fractions |
+
+Use the sidebar to select a page and a **Model** when predictions exist.
+Models with saved backtests appear first, with ridge preferred within each
+availability group. You can select any listed
+model. **Schedule** appears on Backtest. Open the collapsed **Settings**
+below these controls to set **Database path** or choose **Refresh data**,
+which clears the memory caches. Cached reads expire after five
+minutes and use bounded entries keyed by path, model where relevant, and
+the database and WAL file revisions. The app opens `MarketStore` with
+`read_only=True`; it needs no broker or API keys.
+
+Schedule lines use Immediate in solid teal, TWAP in dashed orange, and VWAP in
+dotted slate. Execution compares return, Sharpe, and max drawdown separately.
+Cost in basis points is total fill cost divided by actual traded notional,
+times 10,000. Equal finite rates appear once, allowing only 0.000001 bps of
+floating-point summation noise; differing rates retain separate bars. USD
+cost bars remain. Zero traded notional leaves the rate missing. When impact
+and commission are zero, the shared rate is identified as spread only.
+Cumulative cost
+differences subtract Immediate on the same date; Immediate is the labeled
+zero reference. Compact currency labels and hovers leave raw data unchanged.
+Percentages and bps use one decimal place; Sharpe and t-statistics use two,
+and mean IC uses three. Counts have digit grouping and dates read `04 Jan 2016`.
+
+Create a complete offline demo after installing the package. These commands
+use the built-in 50-symbol universe, 504 synthetic sessions, and shorter
+walk-forward windows:
+
+```bash
+driftwood ingest --synthetic --periods 504 --db data/dashboard-demo.duckdb
+driftwood features --db data/dashboard-demo.duckdb
+driftwood train --db data/dashboard-demo.duckdb --model ridge --min-train-days 60 --test-days 20 --embargo 5
+driftwood backtest --db data/dashboard-demo.duckdb --model ridge
+driftwood attribute --db data/dashboard-demo.duckdb --model ridge
+streamlit run dashboard/app.py
+```
+
+In **Settings**, set **Database path** to `data/dashboard-demo.duckdb`.
+The sidebar identifies the source and simulated fills. No report files are
+required. The CLI `attribute` command prints the contribution table; the
+dashboard computes attribution from the same library.
+
+For an empty or partial study, follow the page's CLI recovery commands,
+then choose **Refresh data**. Run ingestion, features, training, and backtest
+in that order. If you only have older CSV backtest reports, rerun
+`driftwood backtest` once to save the new database snapshot. Changes to bars,
+model scores, or signal-date `vol_21` make a saved backtest stale; rerun it
+before reviewing its charts. If DuckDB reports a lock conflict, stop the
+CLI writer before refreshing.
+
+Attribution uses the latest scored session with an eligible next close,
+a gross target of 1.0, and a 10% per-name cap. Its contributions exclude
+execution costs and differ from filled backtest returns. Rolling IC needs
+a full window of 63 valid daily ICs. Cumulative IC is a sum, not a return.
+The Newey-West allowance uses the stored label horizon: one or five lags.
+Legacy predictions without label metadata are labeled and use five lags.
+
+Coverage includes requested symbols with no bars. Monthly missing fractions
+use the union of dates observed for any symbol, including gaps before or
+after a name's history. This cannot detect a session missing for every name
+and is not an exchange-calendar audit. Complete coverage shows **No missing
+symbol-days** in place of a heatmap. When gaps exist, the heatmap shows only
+affected symbols. Coverage tables show dates without times.
+
+The research pipeline is daily bars, close-of-day features, purged walk-forward
+forecasts, next-session C++ fills, then attribution. The fixed present-day
+universe has survivorship bias. Intraday paths are modeled from daily bars,
+and impact is uncalibrated. Synthetic results demonstrate the workflow; the
+sample-best schedule is not a recommendation.
+
+Sharpe uses a zero risk-free rate and 252 sessions per year. Turnover averages
+daily raw traded notional divided by prior equity over the full stored window.
+The ledger includes the starting flat period before predictions exist.
+
 ## Run a study
 
 Synthetic data, no network, useful for a first look:
@@ -237,7 +330,7 @@ check on the linear fit, not the model to quote. `--label fwd_ret_5d` sets
 the purge to at least five sessions. `--rolling` keeps a fixed training
 length (`--train-days`, default 756) instead of expanding.
 
-A short synthetic file does not have 252 sessions. Shrink the windows:
+For a shorter training window in an offline demo, shrink the windows:
 
 ```bash
 driftwood train --db data/driftwood.duckdb \
@@ -276,9 +369,13 @@ the `prediction` column. It does not trade the stored label. Sigma is
 driftwood backtest --db data/driftwood.duckdb --report reports/backtest
 ```
 
-The note in `reports/backtest.md` has total return, Sharpe, max drawdown,
-average turnover, and cost for each schedule. A short synthetic file needs
-a trained model first, with the walk-forward windows shrunk, and
+Every backtest saves the latest daily equity, returns, costs, turnover, and
+summary for that model in DuckDB, even without `--report`. A rerun replaces
+that model's complete saved schedule set and preserves other models.
+`--report` also writes CSV files and a Markdown note with total return,
+Sharpe, max drawdown, average turnover, and cost for each schedule. A short
+synthetic file needs a trained model first, with the walk-forward windows
+shrunk, and
 `--max-weight` raised if only a few names are in the file. The default cap
 of 0.1 cannot build a gross of 1 out of two names.
 
@@ -306,11 +403,7 @@ return and are not the filled equity-curve return. Training writes the
 coefficients used as betas. If that table is missing, each z-score is
 used with a beta of 1 and the command says so.
 
-The dashboard is a view of the same file. It does not send orders:
-
-```bash
-streamlit run dashboard/app.py
-```
+Open the [dashboard](#review-a-study-in-the-dashboard) to explore the same study file.
 
 Ask the research agent for a proposal. This stops before any action. It
 calls the chat model, so `XAI_API_KEY` has to be set. `XAI_MODEL` defaults
@@ -367,7 +460,7 @@ would have been asked for unadjusted prices.
 | `driftwood/attribution/` | Close-to-close split of the target book across signals |
 | `driftwood/agent/` | Proposals, a human approval stop, and the daily note |
 | `driftwood/cli.py` | `ingest`, `features`, `train`, `backtest`, `paper`, `attribute`, `agent` |
-| `dashboard/` | Read-only Streamlit page. It does not send orders |
+| `dashboard/` | Six read-only Streamlit research pages and Plotly charts |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
 | `docs/DESIGN_DECISIONS.md` | Interview study guide and the decision log |
