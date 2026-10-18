@@ -6,6 +6,18 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
+### Added
+
+- Dollar-neutral target weights from one day's scores, with a gross target
+  and a per-name cap applied once.
+- A backtest that sizes on the signal close and fills on the next session
+  only, using adjusted prices and the C++ simulator.
+- A comparison of immediate, TWAP, and VWAP on the same targets: total
+  return, Sharpe with a zero risk-free rate, max drawdown, turnover, and
+  cost. `driftwood backtest` writes the note.
+
 ## [0.4.0] - 2026-10-18
 
 ### Added
