@@ -134,9 +134,11 @@ drops by roughly the dividend, and the holder is not poorer by that amount.
 
 `adj_close` rewrites history so that percentage changes match the economic
 return of a holder who reinvested dividends and rode through splits. Feature
-math and model labels should use adjusted prices. The raw open, high, low,
-and close stay in the table because they are what the exchange printed, and
-because checking a suspicious return starts by comparing the two series.
+math and model labels should use adjusted prices. The other close stays in
+the table so a suspicious return can be compared with the vendor's second
+series. With current yfinance that second series is already split-adjusted.
+The exchange print from before a split is not in the download. The synthetic
+book is where a raw split is still visible.
 
 The synthetic generator makes this concrete. One symbol is cut 2-for-1 at the
 midpoint. Raw close and volume jump. `adj_close` does not. A test locks that
@@ -203,7 +205,8 @@ The purge is the embargo, and it is at least the label horizon. `fwd_ret_1d`
 on the day before the test is the return from that close to the first test
 close. If that row is in the training set, the model has already seen part
 of the test outcome. Five purged sessions is the default, which also covers
-`fwd_ret_5d`.
+`fwd_ret_5d`. A name that misses a session can step over that calendar gap.
+The fit drops any training row whose own forward print falls on a test date.
 
 The training window expands by default. After a test quarter has happened,
 the next fold may train on it. That is not leakage. Those returns are in the
@@ -390,6 +393,13 @@ If a future vendor frame omits that column, the normalizer copies `close`
 into `adj_close` and warns, rather than inventing an adjustment factor. The
 source string (`yfinance` or `synthetic`) and the ingest timestamp say where
 a number came from.
+
+Current yfinance (the 1.x chart feed, checked against AAPL's 2020 split)
+returns split-adjusted open, high, low, and close even when auto-adjust is
+off. `adj_close` is that series after dividends. The ratio is a dividend
+factor, not a split factor, so a 4-for-1 split does not show up as a raw
+crash. Returns still use `adj_close`. The synthetic generator is what keeps
+a raw split in the file, and the tests lock that path.
 
 The universe used for a run is written to `universe_members` (symbol, name,
 sector). An unknown ticker is stored as sector `Unknown` instead of being
@@ -736,8 +746,13 @@ an embargo of 5, and a horizon inferred from the label (1 or 5). The window
 expands. `--rolling` with `--train-days` (default 756) is the alternative.
 The label is demeaned within each date before the fit, so the target is a
 relative return, and that mean uses only names on that date. It does not
-use other dates. Out-of-sample predictions are the only rows stored.
-In-sample mean Spearman IC is one summary number on the result.
+use other dates. Before that mean, a training row is dropped when that
+name's own label ends on or after the first test session. The purge is a
+shared-calendar gap. A name that skips a session steps over it, because the
+forward return is the next stored print, and that print can fall inside the
+test. On a complete calendar the extra drop removes nothing. Out-of-sample
+predictions are the only rows stored. In-sample mean Spearman IC is one
+summary number on the result.
 
 **Alternatives.**
 
@@ -757,7 +772,10 @@ rolling option exists for that reason. It is not the default, because with
 fifty names the early years are already short. Demeaning inside the day
 makes the target match a long-short book, and it also means one name's
 label moves the target of the other names that day. Those other labels are
-realized at the same time. They are not future days.
+realized at the same time. They are not future days. A name whose own label
+reaches the test is not in that mean. The command also refuses a
+`--label-horizon` shorter than the label, so the row check looks at least
+as far as the label was built.
 
 **Why this one.** It is how the book would have been run. The test scrambles
 every label after a fold's last training date and requires that fold's
@@ -994,7 +1012,10 @@ targets. They do not share a participation cap.
 with no bar on the fill date does not trade that day and keeps its last
 mark. Partial fills leave the book short of the target until the next
 score, which may be the next day and may not. Adjusted high and low are
-the raw bar times `adj_close / close`, not a vendor-adjusted range. Volume
+the raw bar times `adj_close / close`, not a vendor-adjusted range. Close is
+then set to `adj_close`. That assignment can leave the close one rounding
+error outside the scaled high or low, which the fill rejects, so high and
+low are expanded just enough to contain the open and the close. Volume
 is unadjusted relative to that price, so on a split day the participation
 cap and the economic price are in different units. Sigma is whatever
 `vol_21` said on the signal date. If that cell is missing, the fill gets
@@ -1145,7 +1166,11 @@ one does not have to audit the other for a hidden send.
 - Survivorship bias, as above. No delistings, no historical index membership.
 - Daily bars only. Nothing in the file can tell you the intraday path.
 - Adjusted close is the vendor's number, not an event-level replay we control.
-  yfinance has had adjustment bugs in the past. The raw close is the check.
+  yfinance has had adjustment bugs in the past. Current yfinance with
+  auto-adjust off still returns split-adjusted OHLC; `adj_close` then
+  differs by dividends. The stored close is not a newspaper print from
+  before a split. The synthetic split is the check that a raw crash is not
+  treated as a return.
 - The synthetic split scales the whole post-split OHLC. It does not model an
   opening auction or a dividend.
 - One writer, one file. There is no locking story for two ingests at once.
@@ -1212,9 +1237,10 @@ one does not have to audit the other for a hidden send.
 - After the weight cap, the book can be net long or net short, and it can
   hold less than the gross target. With a handful of names the default
   10 percent cap cannot reach a gross of 1.
-- Adjusted high and low are the raw bar scaled by `adj_close / close`.
-  On a split day that price and the stored volume are not in the same
-  units, so the participation cap is only approximately economic.
+- Adjusted high and low are the raw bar scaled by `adj_close / close`,
+  then expanded by at most a rounding error so they still contain the open
+  and the close. On a split day that price and the stored volume are not in
+  the same units, so the participation cap is only approximately economic.
 - Unfilled size is abandoned until the next score. It is not a resting
   order. Orders generated on the last close of the file never fill.
 - The three schedules do not see each other's participation. A day when
@@ -1258,10 +1284,11 @@ it will construct a client for is the Alpaca paper API.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
 survivorship bias and I say that before any result. I download daily bars
-with yfinance, auto-adjust off, and I store the raw close next to the
-adjusted close. Returns use the adjusted series, so a split is not a crash.
-Tests use a synthetic book and never call the network. Bars are validated
-and upserted into a local DuckDB file on symbol and date.
+with yfinance, auto-adjust off, and I store both closes. On the current feed
+the open, high, low, and close are already split-adjusted, and the adjusted
+close also removes dividends. Returns use the adjusted series. Tests use a
+synthetic book and never call the network. Bars are validated and upserted
+into a local DuckDB file on symbol and date.
 
 A feature is stamped at the close. On day t it may use that day's bar and
 earlier bars, not tomorrow. I z-score each feature across the names on that
@@ -1329,11 +1356,14 @@ smeared across the project."
 ### Why store the raw close and the adjusted close?
 
 "They answer different questions. The adjusted close is the economic series:
-a 2-for-1 split should not look like the stock fell in half. The raw close is
-the print, and it is how I notice a bad adjustment. I force yfinance's
-auto-adjust flag off so the vendor cannot collapse those into one column
-without me seeing it. If the adjusted column is ever missing, I copy the raw
-close and warn, rather than guessing a factor."
+a 2-for-1 split should not look like the stock fell in half. I force
+yfinance's auto-adjust flag off so the vendor cannot collapse the two closes
+into one column without me seeing it. If the adjusted column is ever missing,
+I copy the other close and warn, rather than guessing a factor. On the
+current Yahoo feed those two columns differ by dividends. The open, high,
+low, and close are already split-adjusted, so I do not pretend the stored
+close is the print from the paper. The synthetic book is where I show a raw
+split, and that is the test."
 
 ### Does this backtest have survivorship bias?
 
@@ -1401,8 +1431,10 @@ the last training day is the move from that close to the next close, and the
 next close is inside the test window. If I train on that row, I have peeked.
 The purge is the embargo I asked for, and at least the number of sessions
 the label looks ahead. The default embargo is five days, which also covers
-the five-day label. The test scrambles every label after the training cutoff
-and the forecast is not allowed to move."
+the five-day label. If a name skipped a session, its next print can land
+inside the test even when the calendar gap looks wide enough, and that row
+is dropped before the fit. The test scrambles every label after the training
+cutoff and the forecast is not allowed to move."
 
 ### What is an information coefficient, and how is it different from a regression?
 
