@@ -12,7 +12,7 @@ from driftwood.data.store import MarketStore
 from driftwood.features.factors import MODEL_FEATURES
 from driftwood.features.persist import read_features, read_labels
 from driftwood.models.estimators import ColumnBaseline, LightGBMModel
-from driftwood.models.persist import write_predictions
+from driftwood.models.persist import write_coefficients, write_predictions
 from driftwood.models.report import write_ic_report
 from driftwood.models.walkforward import (
     EstimatorFactory,
@@ -97,6 +97,7 @@ def train_store(
         model_name=result.model_name,
         label_column=label,
     )
+    write_coefficients(store, result.weights, model_name=result.model_name)
     report_path = None
     if report_dir is not None:
         report_path = write_ic_report(result, report_dir, label_column=label)
