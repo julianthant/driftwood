@@ -4,6 +4,11 @@ The purge is the embargo the caller asked for, and at least the label
 horizon. A one-day forward return on the session before the test uses the
 first test session's close. That row has to stay out of the fit. Five purged
 sessions is the default so a five-day label is covered too.
+
+The purge is counted on the shared calendar. A name that skips a session can
+still step over it, because its label is the next stored print. Each fit
+drops a training row when that name's own label ends on or after the first
+test session, and only then demeans the label inside the day.
 """
 
 from __future__ import annotations
@@ -126,7 +131,7 @@ def walk_forward(
     model_name = "model"
 
     for fold_id, fold in enumerate(folds):
-        train = panel.loc[panel["date"].isin(fold.train_dates)]
+        train = _training_rows(panel, fold, label_column, config)
         usable = [column for column in feature_columns if train[column].notna().any()]
         fit_rows = train.dropna(subset=[*usable, "_target"])
         if not usable or len(fit_rows) < config.min_train_rows:
@@ -204,12 +209,46 @@ def _prepare(
         raise ValueError(f"Research frame is missing columns: {missing}")
     panel = frame.loc[:, required].copy()
     panel["date"] = _normalize_dates(panel["date"])
+    return _attach_label_end(panel, config.label_horizon)
+
+
+def _attach_label_end(panel: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    """Date of the print ``horizon`` sessions later in that name's own history.
+
+    This matches ``build_labels`` when the frame has one row per stored
+    session. A missing session makes the end date later than the shared
+    calendar would suggest.
+    """
+
+    out = panel.reset_index(drop=True)
+    ordered = out.sort_values(["symbol", "date"], kind="mergesort")
+    ends = ordered.groupby("symbol", sort=False)["date"].shift(-horizon)
+    out["_label_end"] = ends.sort_index()
+    return out
+
+
+def _training_rows(
+    panel: pd.DataFrame,
+    fold: Fold,
+    label_column: str,
+    config: WalkForwardConfig,
+) -> pd.DataFrame:
+    """Training rows whose labels finish before the test window.
+
+    The cross-sectional mean is taken after the drop. A name whose label
+    reaches into the test must not move the target of the names that stay.
+    """
+
+    train = panel.loc[panel["date"].isin(fold.train_dates)].copy()
+    test_start = fold.test_dates[0]
+    finished_before_test = train["_label_end"].isna() | (train["_label_end"] < test_start)
+    train = train.loc[finished_before_test]
     if config.demean_label:
-        daily_mean = panel.groupby("date")[label_column].transform("mean")
-        panel["_target"] = panel[label_column] - daily_mean
+        daily_mean = train.groupby("date")[label_column].transform("mean")
+        train["_target"] = train[label_column] - daily_mean
     else:
-        panel["_target"] = panel[label_column]
-    return panel
+        train["_target"] = train[label_column]
+    return train
 
 
 def _calendar(dates: Sequence[object]) -> list[pd.Timestamp]:
