@@ -1300,6 +1300,45 @@ explains the saved result using the same accounting and diagnostics.
 Researchers can inspect signal quality, filled returns, costs, and data
 gaps without a second simulator or a broker connection.
 
+### ADR-025 — Compact research pages and shared realized cost rates
+
+**Context.** Long explanations compete with charts in a dashboard demonstration.
+Identical cost-rate bars add no comparison, while tiny differences can reflect
+floating-point summation. The saved study can have equal bps costs but different
+USD costs because schedules trade different notionals.
+
+**Decision.** Keep the six native Streamlit pages with short captions, equal-height
+KPI cards and full-width 300px charts. Put Distribution, Cumulative IC and
+Coefficients in tabs after daily IC. Move pipeline explanations and research
+caveats to the README. Keep source and simulation status in the sidebar, with
+Database path and Refresh data in collapsed Settings below Model and Schedule.
+Use minimal toolbar mode and hide `stToolbar` while preserving sidebar collapse.
+
+Use Immediate in solid teal, TWAP in dashed orange and VWAP in dotted slate.
+Apply compact currency and consistent numeric precision without changing raw data.
+Attribution retains every signal row and Total with one decimal place in bps.
+
+A shared helper collapses finite realized cost rates to one value only when each
+is within 1e-6 bps of the first, with zero relative tolerance. This allowance
+covers floating-point summation noise. Missing or nonfinite rates do not collapse;
+differing rates retain separate bars. USD cost bars remain, and zero traded
+notional leaves cost bps missing. Zero impact and commission identify a shared
+rate as spread only. Cumulative cost differences retain Immediate as a labeled
+zero reference, without a separate Immediate trace. The simulator, persistence
+contract and read-only boundary in ADR-024 remain unchanged.
+
+**Alternatives.** Retain paragraph captions and all equal-rate bars, or collapse
+rates after rounding them to the display precision. Paragraphs reduce room for
+analysis. Rounding could hide meaningful differences between realized rates.
+
+**Tradeoff.** Readers use the README for detailed accounting and limitations.
+Compact hovers show less precision than the underlying data. The strict shared
+rate tolerance avoids suppressing differences merely because labels look equal.
+
+**Why this one.** The pages emphasize comparison while retaining USD differences,
+raw values and explicit units. Documentation keeps the research assumptions
+available without repeating them beside every chart.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.

@@ -201,29 +201,35 @@ with a light navy and teal theme:
 
 | Page | What you can review |
 | --- | --- |
-| Overview | Study coverage, signal metrics, normalized equity, and the research pipeline |
+| Overview | Study coverage, signal metrics, and normalized equity |
 | Backtest | One schedule's equity, drawdown, saved assumptions, and daily ledger |
 | Execution | Immediate, TWAP, and VWAP performance, turnover, USD and bps costs, and cumulative cost differences |
-| Model / Signals | Daily and 63-session rolling IC, its distribution and cumulative sum, and fold coefficients |
+| Model / Signals | Daily and rolling IC, with Distribution, Cumulative IC, and Coefficients tabs |
 | Attribution | The latest eligible session's signal contributions and their total |
 | Data | Symbol coverage and monthly missing-observation fractions |
 
-Use the sidebar to select a page, set **Database path**, and select a
-**Model** when predictions exist. Models with saved backtests appear first,
-with ridge preferred within each availability group. You can select any listed
-model. **Schedule** appears on Backtest.
-**Refresh data** clears the memory caches. Cached reads expire after five
+Use the sidebar to select a page and a **Model** when predictions exist.
+Models with saved backtests appear first, with ridge preferred within each
+availability group. You can select any listed
+model. **Schedule** appears on Backtest. Open the collapsed **Settings**
+below these controls to set **Database path** or choose **Refresh data**,
+which clears the memory caches. Cached reads expire after five
 minutes and use bounded entries keyed by path, model where relevant, and
 the database and WAL file revisions. The app opens `MarketStore` with
 `read_only=True`; it needs no broker or API keys.
 
-Schedule lines use Immediate in solid teal, TWAP in dashed blue, and VWAP in
-dotted purple. Execution compares return, Sharpe, and max drawdown separately.
+Schedule lines use Immediate in solid teal, TWAP in dashed orange, and VWAP in
+dotted slate. Execution compares return, Sharpe, and max drawdown separately.
 Cost in basis points is total fill cost divided by actual traded notional,
-times 10,000. Zero traded notional leaves that value missing. Cumulative cost
+times 10,000. Equal finite rates appear once, allowing only 0.000001 bps of
+floating-point summation noise; differing rates retain separate bars. USD
+cost bars remain. Zero traded notional leaves the rate missing. When impact
+and commission are zero, the shared rate is identified as spread only.
+Cumulative cost
 differences subtract Immediate on the same date; Immediate is the labeled
-zero reference. Dollar costs remain precise in data and hover, while large
-currency KPIs use compact labels.
+zero reference. Compact currency labels and hovers leave raw data unchanged.
+Percentages and bps use one decimal place; Sharpe and t-statistics use two,
+and mean IC uses three. Counts have digit grouping and dates read `04 Jan 2016`.
 
 Create a complete offline demo after installing the package. These commands
 use the built-in 50-symbol universe, 504 synthetic sessions, and shorter
@@ -238,10 +244,10 @@ driftwood attribute --db data/dashboard-demo.duckdb --model ridge
 streamlit run dashboard/app.py
 ```
 
-Set **Database path** to `data/dashboard-demo.duckdb`. Synthetic results
-are labeled as demonstrations. No report files are required. The CLI
-`attribute` command prints the contribution table; the dashboard computes
-attribution from the same library.
+In **Settings**, set **Database path** to `data/dashboard-demo.duckdb`.
+The sidebar identifies the source and simulated fills. No report files are
+required. The CLI `attribute` command prints the contribution table; the
+dashboard computes attribution from the same library.
 
 For an empty or partial study, follow the page's CLI recovery commands,
 then choose **Refresh data**. Run ingestion, features, training, and backtest
@@ -264,6 +270,16 @@ after a name's history. This cannot detect a session missing for every name
 and is not an exchange-calendar audit. Complete coverage shows **No missing
 symbol-days** in place of a heatmap. When gaps exist, the heatmap shows only
 affected symbols. Coverage tables show dates without times.
+
+The research pipeline is daily bars, close-of-day features, purged walk-forward
+forecasts, next-session C++ fills, then attribution. The fixed present-day
+universe has survivorship bias. Intraday paths are modeled from daily bars,
+and impact is uncalibrated. Synthetic results demonstrate the workflow; the
+sample-best schedule is not a recommendation.
+
+Sharpe uses a zero risk-free rate and 252 sessions per year. Turnover averages
+daily raw traded notional divided by prior equity over the full stored window.
+The ledger includes the starting flat period before predictions exist.
 
 ## Run a study
 

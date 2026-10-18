@@ -20,6 +20,15 @@ the milestone that introduced them.
 
 ### Changed
 
+- Dashboard captions and controls are shorter, with Database path and Refresh
+  data in collapsed Settings. Charts are full-width at 300px; model diagnostics
+  use Distribution, Cumulative IC and Coefficients tabs after daily IC.
+- Schedule colors are teal for Immediate, orange for TWAP and slate for VWAP,
+  retaining solid, dashed and dotted lines. Numeric precision is consistent,
+  attribution uses one decimal place in bps, and the client toolbar is hidden.
+- Equal finite realized cost rates appear once within a 1e-6 bps noise
+  tolerance; USD costs remain visible and differing rates retain separate bars.
+  Shared rates identify spread-only runs when impact and commission are zero.
 - Dashboard model selection starts with saved backtests and prefers ridge
   within each availability group. Schedule comparisons use consistent labels,
   colors, and line styles, with separate performance and cost panels.
@@ -29,7 +38,7 @@ the milestone that introduced them.
 - Signal labels, coefficient units, and attribution totals are clearer.
   Coverage tables use dates without times; complete coverage replaces the
   heatmap with "No missing symbol-days", and partial heatmaps show affected
-  symbols only. The viewer toolbar hides Deploy.
+  symbols only.
 - Dashboard reads use bounded memory caches with a five-minute expiry,
   database and WAL revision keys, and a manual Refresh data control.
 - Corrected bars, model scores, or signal-date volatility require a fresh
