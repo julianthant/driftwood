@@ -14,7 +14,7 @@ paper trade, and explain each day's result by signal.
 | 1 | Daily bars from yfinance, DuckDB storage, exploratory notebook | Done |
 | 2 | Features, with tests that future data cannot leak in | Done |
 | 3 | Baseline model, walk-forward validation, information coefficient | Done |
-| 4 | C++17 execution simulator, costs, and fill tests | Not started |
+| 4 | C++17 execution simulator, costs, and fill tests | Done |
 | 5 | Backtest and immediate vs TWAP vs VWAP | Not started |
 | 6 | Alpaca paper trading, signal attribution, Streamlit dashboard | Not started |
 | 7 | Research agent with a human approval gate and a daily report | Not started |
@@ -75,12 +75,32 @@ ratio) and the report says so. The plain t-stat treats days as independent.
 When the label overlaps itself, as a five-day return does, that t-stat is
 too flattering. Quote the Newey-West t-stat in the report instead.
 
-TWAP, VWAP, and performance attribution are later milestones. Their
-explanations will land here with the code that uses them.
+**TWAP and VWAP.** TWAP (time-weighted average price) splits an order into
+equal share counts across the session. VWAP (volume-weighted average price)
+splits it in proportion to volume. A daily bar does not contain the
+intraday tape, so both schedules run on a model. The session is eight bins
+by default. Volume is a U-shape, heavier at the open and the close. An
+immediate order is a market-on-open: the first bin is priced at the open,
+and any shares that do not fit the participation cap walk forward into
+later bins.
+
+**Fill and cost.** The raw price is that path, and it stays inside the
+day's high and low. A buy pays more than the raw price, and a sell receives
+less. The gap is half the spread (one basis point by default) plus a
+square-root impact: a coefficient, times a volatility the caller already
+knew, times the square root of the fraction of the bin the order took.
+Commission is per share and shows up in cash, not in the price. A round
+trip of the same schedule loses the spread. The impact coefficient is not
+a fitted Almgren-Chriss model. Nothing here is a portfolio backtest yet.
+
+Performance attribution is a later milestone. Its explanation will land
+here with the code that uses it.
 
 ## Local setup
 
-Python 3.11 or newer. The project is meant to run on Windows, Linux, and macOS.
+Python 3.11 or newer, a C++17 compiler, and CMake. The project is meant to
+run on Windows, Linux, and macOS. `pip install` builds the execution
+simulator (`driftwood._sim`). No separate compile step.
 
 From the repository root in Windows PowerShell:
 
@@ -169,6 +189,25 @@ different model is kept beside it, so ridge and momentum can be compared.
 The label is stored next to the forecast so the report can be rebuilt. A
 later backtest has to trade the `prediction` column.
 
+Price one order against one bar. The numbers come from the C++ extension.
+`sigma` is trailing volatility the caller already knew. Pass yesterday's
+number when a backtest exists. Passing today's close-to-close volatility
+would include today's return:
+
+```python
+from driftwood.execution import execute_order
+
+fill = execute_order(
+    open=100, high=110, low=90, close=105, volume=1_000_000,
+    quantity=200, side="buy", algo="twap", sigma=0.02,
+)
+print(fill.filled, fill.fill_vwap, fill.cash)
+```
+
+`algo` is `immediate`, `twap`, or `vwap`. Cash is from the trader's side, so
+a buy is negative. `fill.unfilled` is what the participation cap could not
+take by the close.
+
 Then open the notebook from the repository root:
 
 ```bash
@@ -196,6 +235,8 @@ would have been asked for unadjusted prices.
 | `driftwood/data/` | Universe, validation, DuckDB store, yfinance and synthetic ingestion |
 | `driftwood/features/` | Close-of-day features, forward labels, and the truncation check |
 | `driftwood/models/` | Walk-forward models, the information coefficient, and the IC report |
+| `driftwood/execution.py` | Thin call into the C++ fill. No second implementation of the price |
+| `cpp/sim/` | C++17 path, TWAP/VWAP schedule, participation cap, and costs |
 | `driftwood/cli.py` | `driftwood ingest`, `driftwood features`, `driftwood train` |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
@@ -203,8 +244,7 @@ would have been asked for unadjusted prices.
 | `data/`, `artifacts/`, `reports/`, `logs/` | Local outputs, not committed |
 
 Planned packages that are not created yet: `portfolio`, `backtest`, `live`,
-`attribution`, and `agent`. The C++ simulator will live in `cpp/sim/`, and
-the Streamlit app in `dashboard/`.
+`attribution`, and `agent`. The Streamlit app will live in `dashboard/`.
 
 ## Credentials
 
