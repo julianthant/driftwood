@@ -1,8 +1,4 @@
-"""Command line entry points.
-
-Only the data stage is wired up so far. Later milestones add subcommands
-beside ``ingest`` rather than a second script.
-"""
+"""Command line entry points."""
 
 from __future__ import annotations
 
@@ -14,6 +10,9 @@ from driftwood.config import database_path, load_env
 from driftwood.data.ingest import ingest_synthetic, ingest_yfinance
 from driftwood.data.store import MarketStore
 from driftwood.data.yfinance import DataUnavailable
+from driftwood.features.factors import MODEL_FEATURES
+from driftwood.features.persist import write_research_tables
+from driftwood.features.pipeline import build_research_frame
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,10 +51,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     ingest.add_argument("--db", default=None, help="DuckDB file. Defaults to DRIFTWOOD_DB or data/")
 
+    features = sub.add_parser(
+        "features",
+        help="Build close-of-day features and forward labels from stored bars",
+    )
+    features.add_argument(
+        "--db",
+        default=None,
+        help="DuckDB file. Defaults to DRIFTWOOD_DB or data/",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.command == "ingest":
         return _ingest(parser, args)
+    if args.command == "features":
+        return _features(args)
     parser.error(f"Unknown command {args.command}")
     return 2
 
@@ -91,6 +102,25 @@ def _ingest(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     print(result.summary())
     print(f"database: {path}")
     return 0 if result.ok else 1
+
+
+def _features(args: argparse.Namespace) -> int:
+    path = database_path(args.db)
+    with MarketStore(path) as store:
+        bars = store.read_bars()
+        if bars.empty:
+            print("no bars in the database; run driftwood ingest first", file=sys.stderr)
+            return 1
+        frame = build_research_frame(bars)
+        feature_rows, label_rows = write_research_tables(store, frame)
+    print(f"features: {feature_rows} rows, labels: {label_rows} rows")
+    print(f"database: {path}")
+    for column in ("z_ret_1d", "z_mom_12_1"):
+        if column not in MODEL_FEATURES:
+            continue
+        present = frame[column].notna().mean()
+        print(f"{column} non-null: {present:.1%}")
+    return 0
 
 
 if __name__ == "__main__":

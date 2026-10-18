@@ -6,6 +6,20 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
+### Added
+
+- Close-of-day features (trailing returns, 12-minus-1 momentum, volatility,
+  volume shock, distance from a moving average, range, log volume) and
+  same-day cross-sectional z-scores.
+- Forward one-day and five-day labels, stored in a separate table from the
+  features.
+- A truncation test that fails if a feature changes when the future is
+  removed, including negative cases for a centered window and a full-sample
+  scaler.
+- `driftwood features`, which rebuilds both tables from the bars already stored.
+
 ## [0.1.0] - 2026-10-18
 
 ### Added
