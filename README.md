@@ -12,7 +12,7 @@ paper trade, and explain each day's result by signal.
 | Milestone | What it adds | State |
 | --- | --- | --- |
 | 1 | Daily bars from yfinance, DuckDB storage, exploratory notebook | Done |
-| 2 | Features, with tests that future data cannot leak in | Not started |
+| 2 | Features, with tests that future data cannot leak in | Done |
 | 3 | Baseline model, walk-forward validation, information coefficient | Not started |
 | 4 | C++17 execution simulator, costs, and fill tests | Not started |
 | 5 | Backtest and immediate vs TWAP vs VWAP | Not started |
@@ -42,9 +42,20 @@ shrank, failed, or left the index never appear. Backtests on this list will
 look kinder than a real trading book. That limitation is accepted for the
 first version and called out in `docs/DESIGN_DECISIONS.md`.
 
-Later milestones add lookahead bias, the information coefficient,
-walk-forward validation, TWAP, VWAP, and performance attribution. Those
-explanations will land in this section with the code that uses them.
+**Lookahead bias.** A feature dated Monday that uses Tuesday's close, in a
+backtest that pretends the Monday trade was possible. Driftwood stamps
+features at the close. The row for day `t` may use that day's bar and earlier
+bars. It may not use day `t+1`. The same day's high and low are allowed,
+because the close has already printed them. They would not be allowed for an
+order placed at the open. The forward return is a label, computed in a
+separate function and stored in a separate table. The test rebuilds the
+features on history cut off at a date and requires the past values to match.
+A centered moving average fails that test. So does a z-score fit on the
+whole sample.
+
+The information coefficient, walk-forward validation, TWAP, VWAP, and
+performance attribution are later milestones. Their explanations will land
+here with the code that uses them.
 
 ## Local setup
 
@@ -95,6 +106,19 @@ Omit `--symbols` to use the built-in 50 names. Running the command again
 replaces bars for the same symbol and date and appends a row to the ingest
 log. The database file lives under `data/` and is gitignored.
 
+Build features and labels from the bars already in the file. This does not
+download anything. Features for day `t` use information known at that close.
+Labels are the next-day and five-day adjusted returns, written to their own
+table:
+
+```bash
+driftwood features --db data/driftwood.duckdb
+```
+
+`mom_12_1` (a year of momentum, skipping the most recent month) stays empty
+until a name has about a year of bars. A short synthetic book will say so in
+the non-null fraction the command prints.
+
 Then open the notebook from the repository root:
 
 ```bash
@@ -120,15 +144,16 @@ would have been asked for unadjusted prices.
 | Path | Role |
 | --- | --- |
 | `driftwood/data/` | Universe, validation, DuckDB store, yfinance and synthetic ingestion |
-| `driftwood/cli.py` | `driftwood ingest` |
+| `driftwood/features/` | Close-of-day features, forward labels, and the truncation check |
+| `driftwood/cli.py` | `driftwood ingest`, `driftwood features` |
 | `notebooks/` | Exploratory notebook |
 | `tests/` | Automated checks |
 | `docs/DESIGN_DECISIONS.md` | Interview study guide and the decision log |
 | `data/`, `artifacts/`, `reports/`, `logs/` | Local outputs, not committed |
 
-Planned packages that are not created yet: `features`, `models`, `portfolio`,
-`backtest`, `live`, `attribution`, and `agent`. The C++ simulator will live
-in `cpp/sim/`, and the Streamlit app in `dashboard/`.
+Planned packages that are not created yet: `models`, `portfolio`, `backtest`,
+`live`, `attribution`, and `agent`. The C++ simulator will live in `cpp/sim/`,
+and the Streamlit app in `dashboard/`.
 
 ## Credentials
 
