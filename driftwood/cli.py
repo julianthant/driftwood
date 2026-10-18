@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from driftwood.config import database_path, load_env
 from driftwood.data.ingest import ingest_synthetic, ingest_yfinance
@@ -13,6 +14,9 @@ from driftwood.data.yfinance import DataUnavailable
 from driftwood.features.factors import MODEL_FEATURES
 from driftwood.features.persist import write_research_tables
 from driftwood.features.pipeline import build_research_frame
+from driftwood.models.ic import information_coefficient, summarize_ic
+from driftwood.models.train import horizon_for_label, train_store
+from driftwood.models.walkforward import InsufficientHistory, WalkForwardConfig
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,12 +65,70 @@ def main(argv: list[str] | None = None) -> int:
         help="DuckDB file. Defaults to DRIFTWOOD_DB or data/",
     )
 
+    train = sub.add_parser(
+        "train",
+        help="Walk-forward fit on stored features and write out-of-sample predictions",
+    )
+    train.add_argument("--db", default=None, help="DuckDB file. Defaults to DRIFTWOOD_DB or data/")
+    train.add_argument(
+        "--model",
+        choices=("ridge", "momentum", "lgbm"),
+        default="ridge",
+        help="ridge fits the z-scores, momentum copies z_mom_12_1, lgbm is the tree check",
+    )
+    train.add_argument(
+        "--label",
+        choices=("fwd_ret_1d", "fwd_ret_5d"),
+        default="fwd_ret_1d",
+    )
+    train.add_argument("--min-train-days", type=int, default=252)
+    train.add_argument("--test-days", type=int, default=63)
+    train.add_argument(
+        "--embargo",
+        type=int,
+        default=5,
+        help="Sessions dropped between train and test. The purge is at least the label horizon.",
+    )
+    train.add_argument(
+        "--label-horizon",
+        type=int,
+        default=None,
+        help=(
+            "Extend the horizon inferred from the label "
+            "(1 for fwd_ret_1d, 5 for fwd_ret_5d). Cannot be shorter."
+        ),
+    )
+    train.add_argument(
+        "--train-days",
+        type=int,
+        default=756,
+        help="Training length when --rolling is set. Ignored for the default expanding window.",
+    )
+    train.add_argument(
+        "--rolling",
+        action="store_true",
+        help="Use a fixed training length instead of an expanding window",
+    )
+    train.add_argument(
+        "--alpha",
+        type=float,
+        default=1.0,
+        help="Ridge penalty. Ignored by the momentum and tree models.",
+    )
+    train.add_argument(
+        "--report",
+        default=None,
+        help="Directory for the IC report. Omit to store predictions without writing files.",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.command == "ingest":
         return _ingest(parser, args)
     if args.command == "features":
         return _features(args)
+    if args.command == "train":
+        return _train(parser, args)
     parser.error(f"Unknown command {args.command}")
     return 2
 
@@ -121,6 +183,67 @@ def _features(args: argparse.Namespace) -> int:
         present = frame[column].notna().mean()
         print(f"{column} non-null: {present:.1%}")
     return 0
+
+
+def _train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    inferred = horizon_for_label(args.label)
+    if args.label_horizon is None:
+        horizon = inferred
+    elif args.label_horizon < inferred:
+        parser.error(
+            f"--label-horizon must be at least {inferred} for {args.label}, "
+            f"got {args.label_horizon}"
+        )
+    else:
+        horizon = args.label_horizon
+    try:
+        config = WalkForwardConfig(
+            min_train_days=args.min_train_days,
+            test_days=args.test_days,
+            embargo_days=args.embargo,
+            label_horizon=horizon,
+            expanding=not args.rolling,
+            train_days=args.train_days,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    path = database_path(args.db)
+    report_dir = Path(args.report) if args.report else None
+    try:
+        with MarketStore(path) as store:
+            trained = train_store(
+                store,
+                model=args.model,
+                label=args.label,
+                config=config,
+                alpha=args.alpha,
+                report_dir=report_dir,
+            )
+    except (RuntimeError, InsufficientHistory, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    daily = information_coefficient(trained.result.predictions, "prediction", args.label)
+    summary = summarize_ic(daily, hac_lags=config.label_horizon)
+    print(
+        f"model: {trained.result.model_name}, "
+        f"predictions: {trained.rows_written} rows, "
+        f"folds: {len(trained.result.folds)}"
+    )
+    print(f"mean spearman IC: {_format_ic(summary['mean_ic'])}")
+    if report_dir is not None:
+        print(f"report: {trained.report_path}")
+    print(f"database: {path}")
+    return 0
+
+
+def _format_ic(value: object) -> str:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "n/a"
+    if number != number:
+        return "n/a"
+    return f"{number:.4f}"
 
 
 if __name__ == "__main__":
