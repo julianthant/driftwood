@@ -688,6 +688,9 @@ return ordered them? Mean Spearman IC is that sentence.
   it is entirely missing and uses it once it exists.
 - The headline model is linear. The tree is a check with small, untuned
   settings. Alpha is fixed. It is not chosen by looking at the test IC.
+- On macOS the LightGBM wheel does not bundle OpenMP. `brew install libomp`
+  is required or the import fails. CI installs it. Ridge and the momentum
+  baseline do not need it.
 - There is no portfolio and no cost. The information coefficient is not a
   return and it is not a Sharpe ratio. A forecast can rank names well and
   still lose money after spread and impact.

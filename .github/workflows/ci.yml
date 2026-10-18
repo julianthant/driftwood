@@ -31,6 +31,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake
 
+      - name: Install OpenMP on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install libomp
+
       - name: Lint and install
         shell: bash
         run: |
