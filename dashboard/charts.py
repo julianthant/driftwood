@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-COLORS = {"immediate": "#087f8c", "twap": "#3f63b5", "vwap": "#996214"}
+from dashboard.formatting import compact_money, schedule_label, signal_label
+from dashboard.views import relative_costs
+
+COLORS = {"immediate": "#087f8c", "twap": "#3564b8", "vwap": "#9b3f8b"}
+DASHES = {"immediate": "solid", "twap": "dash", "vwap": "dot"}
 TEAL = "#087f8c"
 RED = "#ba4653"
 
@@ -25,7 +30,7 @@ def figure(y_title: str, *, height: int = 330) -> go.Figure:
         colorway=list(COLORS.values()),
     )
     chart.update_xaxes(showgrid=False, zeroline=False)
-    chart.update_yaxes(gridcolor="#e8edf4", zerolinecolor="#c4cedd")
+    chart.update_yaxes(gridcolor="#e8edf4", zeroline=False)
     return chart
 
 
@@ -36,9 +41,13 @@ def equity_chart(daily: pd.DataFrame) -> go.Figure:
             go.Scatter(
                 x=frame["date"],
                 y=frame["growth"],
-                name=str(algo).upper(),
+                name=schedule_label(str(algo)),
                 mode="lines",
-                line={"color": COLORS.get(str(algo), TEAL), "width": 2},
+                line={
+                    "color": COLORS.get(str(algo), TEAL),
+                    "width": 2,
+                    "dash": DASHES.get(str(algo), "solid"),
+                },
                 hovertemplate="%{y:.4f}×<extra>%{fullData.name}</extra>",
             )
         )
@@ -48,15 +57,18 @@ def equity_chart(daily: pd.DataFrame) -> go.Figure:
 
 def drawdown_chart(daily: pd.DataFrame) -> go.Figure:
     chart = figure("Drawdown")
+    algo = str(daily["algo"].iloc[0])
+    color = COLORS.get(algo, TEAL)
+    rgb = ",".join(str(int(color[i : i + 2], 16)) for i in (1, 3, 5))
     chart.add_trace(
         go.Scatter(
             x=daily["date"],
             y=daily["drawdown"],
-            name="Drawdown",
+            name=schedule_label(algo),
             mode="lines",
             fill="tozeroy",
-            line={"color": RED, "width": 1.5},
-            fillcolor="rgba(186,70,83,0.14)",
+            line={"color": color, "width": 1.5, "dash": DASHES.get(algo, "solid")},
+            fillcolor=f"rgba({rgb},0.12)",
             hovertemplate="%{y:.2%}<extra></extra>",
         )
     )
@@ -65,19 +77,82 @@ def drawdown_chart(daily: pd.DataFrame) -> go.Figure:
 
 
 def cost_chart(daily: pd.DataFrame) -> go.Figure:
-    chart = figure("Cumulative cost (USD)")
-    for algo, frame in daily.groupby("algo", sort=True):
+    """Show incremental dollars versus Immediate; the reference is an annotation."""
+    chart = figure("Cumulative cost difference (USD)")
+    for algo, frame in relative_costs(daily).groupby("algo", sort=True):
         chart.add_trace(
             go.Scatter(
                 x=frame["date"],
-                y=frame["cumulative_cost"],
-                name=str(algo).upper(),
+                y=frame["cost_difference"],
+                name=schedule_label(str(algo)),
                 mode="lines",
-                line={"color": COLORS.get(str(algo), TEAL), "width": 2},
+                line={
+                    "color": COLORS.get(str(algo), TEAL),
+                    "width": 2,
+                    "dash": DASHES.get(str(algo), "solid"),
+                },
                 hovertemplate="$%{y:,.2f}<extra>%{fullData.name}</extra>",
             )
         )
-    chart.update_yaxes(tickprefix="$", tickformat=",")
+    chart.update_yaxes(tickprefix="$", tickformat=",.0f")
+    chart.add_hline(
+        y=0,
+        line_dash="dot",
+        line_color="#8b9ab1",
+        annotation_text="Immediate reference",
+        annotation_position="bottom right",
+    )
+    return chart
+
+
+def comparison_chart(summary: pd.DataFrame, *, costs: bool = False) -> go.Figure:
+    """Separate panels keep dollars, basis points, returns and Sharpe in their own units."""
+    metrics = (
+        [
+            ("total_cost", "Total fill cost · USD", "$,.0f"),
+            ("cost_bps", "Cost / traded notional · bps", ".2f"),
+        ]
+        if costs
+        else [
+            ("total_return", "Total return", ".1%"),
+            ("sharpe", "Sharpe", ".2f"),
+            ("max_drawdown", "Max drawdown", ".1%"),
+        ]
+    )
+    chart = make_subplots(rows=1, cols=len(metrics), subplot_titles=[m[1] for m in metrics])
+    chart.update_layout(figure("", height=280).layout)
+    ordered = summary.set_index("algo").reindex([a for a in COLORS if a in set(summary["algo"])])
+    labels = [schedule_label(str(algo)) for algo in ordered.index]
+    colors = [COLORS[str(algo)] for algo in ordered.index]
+    for column, (metric, _, spec) in enumerate(metrics, start=1):
+        values = ordered[metric]
+        text = (
+            [compact_money(value) for value in values]
+            if metric == "total_cost"
+            else [format(value, spec) if pd.notna(value) else "n/a" for value in values]
+        )
+        chart.add_trace(
+            go.Bar(
+                x=labels,
+                y=values,
+                marker_color=colors,
+                text=text,
+                textposition="outside",
+                cliponaxis=False,
+                showlegend=False,
+                hovertemplate=(
+                    "%{x}<br>%{y:$,.2f}<extra></extra>"
+                    if metric == "total_cost"
+                    else f"%{{x}}<br>%{{y:{spec}}}<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=column,
+        )
+        chart.update_xaxes(showgrid=False, tickangle=0, row=1, col=column)
+        chart.update_yaxes(gridcolor="#e8edf4", zeroline=False, tickformat=spec, row=1, col=column)
+    chart.update_layout(hovermode="closest", margin={"t": 65, "b": 30})
+    chart.update_annotations(font_size=13)
     return chart
 
 
@@ -121,22 +196,31 @@ def ic_histogram(daily: pd.DataFrame) -> go.Figure:
 
 def contribution_chart(frame: pd.DataFrame, *, coefficient: bool = False) -> go.Figure:
     label, value = ("feature", "weight") if coefficient else ("signal", "contribution")
-    ordered = frame.sort_values(value)
-    chart = figure("Coefficient" if coefficient else "Contribution (bps)")
+    ordered = frame.sort_values(value, kind="stable")
+    chart = figure("Coefficient (×10⁻⁴)" if coefficient else "Contribution (bps)")
     chart.add_trace(
         go.Bar(
-            x=ordered[label],
-            y=ordered[value] * (1 if coefficient else 10_000),
+            x=ordered[label].map(signal_label),
+            y=ordered[value] * 10_000,
+            customdata=ordered[value],
             marker_color=[TEAL if item >= 0 else RED for item in ordered[value]],
-            hovertemplate="%{x}<br>%{y:.3f}<extra></extra>",
+            hovertemplate=(
+                "%{x}<br>Coefficient: %{customdata:.2e}<extra></extra>"
+                if coefficient
+                else "%{x}<br>%{y:.2f} bps<extra></extra>"
+            ),
         )
     )
     chart.update_layout(hovermode="closest")
+    chart.update_xaxes(tickangle=-25, tickfont_size=11)
+    if coefficient:
+        chart.update_yaxes(tickformat=".1f")
     return chart
 
 
 def coverage_chart(coverage: pd.DataFrame) -> go.Figure:
-    chart = figure("Observed sessions")
+    chart = figure("Observed sessions", height=250)
+    coverage = coverage.sort_values(["sessions", "symbol"], kind="stable")
     chart.add_trace(
         go.Bar(
             x=coverage["symbol"],

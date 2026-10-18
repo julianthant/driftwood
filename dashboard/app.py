@@ -14,6 +14,7 @@ if root not in sys.path:
     sys.path.insert(0, root)
 
 from dashboard import charts, data  # noqa: E402
+from dashboard.formatting import compact_money, schedule_label, signal_label  # noqa: E402
 from dashboard.views import attribution_table  # noqa: E402
 from driftwood.config import database_path, load_env  # noqa: E402
 
@@ -106,21 +107,23 @@ def overview(study: data.Study, path: str, model: str | None, revision: tuple) -
         )
         st.caption(
             f"Walk-forward predictions · {model} · label: {quality.label} · "
-            f"HAC allowance: {quality.hac_lags} sessions. IC measures ranking, before costs."
+            f"HAC lags: {quality.hac_lags}. IC measures ranking, before costs."
         )
         result = get_backtest(path, model, revision)
         if result is not None:
             best = result.summary.sort_values("total_return", ascending=False).iloc[0]
-            st.subheader(f"Execution snapshot · {str(best['algo']).upper()}")
+            st.subheader(f"Execution snapshot · {schedule_label(str(best['algo']))}")
             metrics(
                 [
                     ("Total return", number(best["total_return"], ".2%")),
                     ("Annualized Sharpe", number(best["sharpe"], ".2f")),
                     ("Max drawdown", number(best["max_drawdown"], ".2%")),
-                    ("Fill cost · USD", "$" + number(best["total_cost"], ",.2f")),
+                    ("Fill cost · USD", compact_money(best["total_cost"])),
                 ]
             )
             st.caption(
+                f"Fill cost: {number(best['cost_bps'], '.2f')} bps of "
+                f"{compact_money(best['total_traded_notional'])} traded notional. "
                 "Highest return in this sample, shown for orientation. "
                 "This is a retrospective comparison, not a schedule recommendation."
             )
@@ -156,7 +159,7 @@ def backtest(path: str, model: str, revision: tuple) -> None:
     if result is None:
         return
     schedules = result.summary["algo"].astype(str).tolist()
-    selected = st.sidebar.selectbox("Schedule", schedules, format_func=str.upper)
+    selected = st.sidebar.selectbox("Schedule", schedules, format_func=schedule_label)
     summary = result.summary.set_index("algo").loc[selected]
     daily = result.daily.loc[result.daily["algo"] == selected]
     metrics(
@@ -164,8 +167,12 @@ def backtest(path: str, model: str, revision: tuple) -> None:
             ("Total return", number(summary["total_return"], ".2%")),
             ("Annualized Sharpe", number(summary["sharpe"], ".2f")),
             ("Max drawdown", number(summary["max_drawdown"], ".2%")),
-            ("Fill cost · USD", "$" + number(summary["total_cost"], ",.2f")),
+            ("Fill cost · USD", compact_money(summary["total_cost"])),
         ]
+    )
+    st.caption(
+        f"Fill cost: {number(summary['cost_bps'], '.2f')} bps of "
+        f"{compact_money(summary['total_traded_notional'])} traded notional."
     )
     st.subheader("Equity curve")
     plot(charts.equity_chart(daily))
@@ -184,7 +191,17 @@ def backtest(path: str, model: str, revision: tuple) -> None:
             "The ledger includes the initial flat period before predictions start."
         )
         st.json(result.config)
-        st.dataframe(daily, hide_index=True, width="stretch")
+        ledger = daily.copy()
+        ledger["algo"] = ledger["algo"].map(schedule_label)
+        st.dataframe(
+            ledger,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "algo": "Schedule",
+                "date": st.column_config.DateColumn("Session", format="YYYY-MM-DD"),
+            },
+        )
 
 
 def execution(path: str, model: str, revision: tuple) -> None:
@@ -208,8 +225,11 @@ def execution(path: str, model: str, revision: tuple) -> None:
             "max_drawdown": "Max drawdown",
             "avg_turnover": "Avg daily turnover",
             "total_cost": "Cost (USD)",
+            "cost_bps": "Cost (bps)",
+            "total_traded_notional": "Traded notional",
         }
     )
+    table["Schedule"] = table["Schedule"].map(schedule_label)
     st.dataframe(
         table.style.format(
             {
@@ -217,7 +237,9 @@ def execution(path: str, model: str, revision: tuple) -> None:
                 "Sharpe": "{:.2f}",
                 "Max drawdown": "{:.2%}",
                 "Avg daily turnover": "{:.2%}",
-                "Cost (USD)": "${:,.2f}",
+                "Cost (USD)": compact_money,
+                "Cost (bps)": "{:.2f}",
+                "Traded notional": compact_money,
             },
             na_rep="—",
         ),
@@ -228,18 +250,28 @@ def execution(path: str, model: str, revision: tuple) -> None:
         "Sharpe uses zero risk-free rate and 252 sessions/year. Turnover is traded raw "
         "notional divided by prior equity, averaged over the full stored window."
     )
+    plot(charts.comparison_chart(result.summary))
     st.subheader("Equity comparison")
     plot(charts.equity_chart(result.daily))
     st.caption(
         "Independent books with identical signals and starting capital. "
         "The path inside each daily bar is simulated, not observed intraday trading."
     )
-    st.subheader("The cost of crossing the spread")
-    plot(charts.cost_chart(result.daily))
+    st.subheader("Execution cost comparison")
+    plot(charts.comparison_chart(result.summary, costs=True))
     st.caption(
-        "Accumulated spread, impact and commission in USD, measured from fill cash "
-        "versus raw notional. Market price moves are excluded."
+        "Fill cost includes spread, impact and commission. Basis points divide total cost by "
+        "actual raw traded notional, not initial capital. Equal bps can accompany different "
+        "dollar costs when schedules trade different notionals. Hover for unrounded dollar costs."
     )
+    if "immediate" in set(result.summary["algo"]) and len(result.summary) > 1:
+        st.subheader("Cumulative cost relative to Immediate")
+        plot(charts.cost_chart(result.daily))
+        st.caption(
+            "Each line subtracts Immediate's cumulative fill cost on the same date. "
+            "Positive means more cost; negative means less. The dotted reference is $0 "
+            "difference. Market price moves are excluded."
+        )
 
 
 def model_quality(path: str, model: str, revision: tuple) -> None:
@@ -251,10 +283,9 @@ def model_quality(path: str, model: str, revision: tuple) -> None:
             ("Positive IC sessions", number(quality.summary["hit_rate"], ".1%")),
         ]
     )
-    st.caption(
-        f"Model: {model} · label: {quality.label} · HAC lags: {quality.hac_lags}. "
-        "Legacy predictions without label metadata use a five-lag allowance."
-    )
+    st.caption(f"Model: {model} · label: {quality.label} · HAC lags: {quality.hac_lags}.")
+    if not quality.label_known:
+        st.caption("Legacy predictions without label metadata use a five-lag allowance.")
     if not quality.summary["n_dates"]:
         empty_state(
             "No session has enough distinct forecasts and realized labels to compute IC.",
@@ -335,11 +366,13 @@ def attribution(path: str, model: str, revision: tuple) -> None:
         "It is computed from the latest eligible scored session; no report file is required."
     )
     table = attribution_table(result.by_signal)
+    table["signal"] = table["signal"].map(signal_label)
     table["Contribution (bps)"] = table.pop("contribution") * 10_000
-    st.dataframe(
-        table.style.format({"Contribution (bps)": "{:.3f}"}),
-        hide_index=True,
-        width="stretch",
+    st.table(
+        table.rename(columns={"signal": "Signal"})
+        .style.format({"Contribution (bps)": "{:.2f}"})
+        .hide(axis="index"),
+        border="horizontal",
     )
 
 
@@ -363,9 +396,24 @@ def market_data(study: data.Study) -> None:
     st.caption(
         "The number of stored daily bars for each symbol. Shorter histories deserve a check."
     )
-    st.dataframe(study.coverage, hide_index=True, width="stretch")
+    st.dataframe(
+        study.coverage.sort_values(["sessions", "symbol"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "symbol": "Symbol",
+            "sessions": "Sessions",
+            "missing": "Missing sessions",
+            "first": st.column_config.DateColumn("First session", format="YYYY-MM-DD"),
+            "last": st.column_config.DateColumn("Last session", format="YYYY-MM-DD"),
+        },
+    )
     st.subheader("Where observations are missing")
-    plot(charts.missing_chart(study.missing))
+    if possible == observed:
+        st.success("No missing symbol-days")
+    else:
+        affected = study.missing.loc[study.missing.gt(0).any(axis=1)]
+        plot(charts.missing_chart(affected))
     st.caption(
         "Monthly fraction of missing observations relative to dates seen for any symbol "
         "in this database. Includes gaps before listing and after the last observation. "
@@ -391,6 +439,7 @@ def main() -> None:
         .expanduser()
         .resolve()
     )
+    model_slot = st.sidebar.empty()
     if st.sidebar.button("Refresh data", width="stretch"):
         for loader in (study_data, quality_data, backtest_data, attribution_data):
             loader.clear()
@@ -425,7 +474,7 @@ def main() -> None:
     try:
         with st.spinner("Reading the study…"):
             study = study_data(path, revision)
-        model = st.sidebar.selectbox("Model", study.models) if study.models else None
+        model = model_slot.selectbox("Model", study.models) if study.models else None
         source = ", ".join(study.sources)
         st.caption(
             f"Source: {source} · "

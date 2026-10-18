@@ -218,7 +218,7 @@ def test_all_dashboard_pages_render_and_schedule_switches(study_db, monkeypatch)
     expected = {
         "Overview": 1,
         "Backtest": 2,
-        "Execution": 2,
+        "Execution": 4,
         "Model / Signals": 3,
         "Attribution": 1,
         "Data": 2,
@@ -228,6 +228,9 @@ def test_all_dashboard_pages_render_and_schedule_switches(study_db, monkeypatch)
         assert not at.exception, [e.message for e in at.exception]
         assert len(at.get("plotly_chart")) == charts_count, page
         assert not at.error
+        if page == "Attribution":
+            assert len(at.table) == 1
+            assert at.table[0].value.iloc[-1]["Signal"] == "Total"
     at.sidebar.radio[0].set_value("Backtest").run()
     schedule = next(item for item in at.sidebar.selectbox if item.label == "Schedule")
     schedule.set_value("twap").run()
@@ -259,7 +262,8 @@ def test_friendly_database_empty_states(tmp_path, monkeypatch, state):
         assert not path.exists()
     if state == "bars_only":
         at.sidebar.radio[0].set_value("Data").run()
-        assert len(at.get("plotly_chart")) == 2
+        assert len(at.get("plotly_chart")) == 1
+        assert any(item.value == "No missing symbol-days" for item in at.success)
         assert not at.exception
 
 
