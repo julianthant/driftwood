@@ -7,14 +7,16 @@ import logging
 import sys
 from pathlib import Path
 
+from driftwood.backtest import BacktestConfig, run_backtest, write_backtest_report
 from driftwood.config import database_path, load_env
 from driftwood.data.ingest import ingest_synthetic, ingest_yfinance
 from driftwood.data.store import MarketStore
 from driftwood.data.yfinance import DataUnavailable
 from driftwood.features.factors import MODEL_FEATURES
-from driftwood.features.persist import write_research_tables
+from driftwood.features.persist import read_features, write_research_tables
 from driftwood.features.pipeline import build_research_frame
 from driftwood.models.ic import information_coefficient, summarize_ic
+from driftwood.models.persist import read_predictions
 from driftwood.models.train import horizon_for_label, train_store
 from driftwood.models.walkforward import InsufficientHistory, WalkForwardConfig
 
@@ -118,6 +120,35 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for the IC report. Omit to store predictions without writing files.",
     )
 
+    backtest = sub.add_parser(
+        "backtest",
+        help="Fill next-session orders for immediate, TWAP, and VWAP",
+    )
+    backtest.add_argument(
+        "--db",
+        default=None,
+        help="DuckDB file. Defaults to DRIFTWOOD_DB or data/",
+    )
+    backtest.add_argument("--model", default="ridge", help="Prediction model name to trade")
+    backtest.add_argument(
+        "--algos",
+        nargs="+",
+        choices=("immediate", "twap", "vwap"),
+        default=["immediate", "twap", "vwap"],
+    )
+    backtest.add_argument("--capital", type=float, default=1_000_000.0)
+    backtest.add_argument("--gross", type=float, default=1.0)
+    backtest.add_argument("--max-weight", type=float, default=0.1)
+    backtest.add_argument("--half-spread-bps", type=float, default=1.0)
+    backtest.add_argument("--impact", type=float, default=0.0)
+    backtest.add_argument("--participation", type=float, default=0.1)
+    backtest.add_argument("--min-trade-dollars", type=float, default=0.0)
+    backtest.add_argument(
+        "--report",
+        default=None,
+        help="Directory for the comparison. Omit to print the summary only.",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.command == "ingest":
@@ -126,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return _features(args)
     if args.command == "train":
         return _train(parser, args)
+    if args.command == "backtest":
+        return _backtest(args)
     parser.error(f"Unknown command {args.command}")
     return 2
 
@@ -223,6 +256,64 @@ def _train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     print(f"mean spearman IC: {_format_ic(summary['mean_ic'])}")
     if report_dir is not None:
         print(f"report: {trained.report_path}")
+    print(f"database: {path}")
+    return 0
+
+
+def _backtest(args: argparse.Namespace) -> int:
+    path = database_path(args.db)
+    try:
+        config = BacktestConfig(
+            initial_capital=args.capital,
+            gross=args.gross,
+            max_weight=args.max_weight,
+            min_trade_dollars=args.min_trade_dollars,
+            half_spread_bps=args.half_spread_bps,
+            impact_coef=args.impact,
+            participation_limit=args.participation,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    with MarketStore(path) as store:
+        bars = store.read_bars()
+        if bars.empty:
+            print("no bars in the database; run driftwood ingest first", file=sys.stderr)
+            return 1
+        try:
+            predictions = read_predictions(store)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        try:
+            features = read_features(store)
+        except RuntimeError:
+            features = None
+    chosen = predictions.loc[predictions["model"] == args.model]
+    if chosen.empty:
+        print(f"no predictions for model {args.model}", file=sys.stderr)
+        return 1
+    scores = chosen.loc[:, ["symbol", "date", "prediction"]].rename(columns={"prediction": "score"})
+    volatility = None
+    if features is not None and "vol_21" in features.columns:
+        volatility = features.loc[:, ["symbol", "date", "vol_21"]].rename(
+            columns={"vol_21": "sigma"}
+        )
+    try:
+        result = run_backtest(
+            bars,
+            scores,
+            algos=tuple(args.algos),
+            config=config,
+            volatility=volatility,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(result.summary.to_string(index=False))
+    if args.report:
+        report = write_backtest_report(result, Path(args.report))
+        print(f"report: {report}")
     print(f"database: {path}")
     return 0
 
