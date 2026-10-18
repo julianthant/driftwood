@@ -6,6 +6,19 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
+### Added
+
+- A C++17 execution simulator, built into `driftwood._sim` with pybind11
+  and scikit-build-core. Python calls it and does not reimplement the fill.
+- Immediate (market-on-open), TWAP, and VWAP schedules on a deterministic
+  path that stays inside the daily bar. Unfilled size carries forward until
+  a participation cap, then is left unfilled at the close.
+- Half-spread, per-share commission, and a square-root impact. Buys pay
+  more than the raw price and sells receive less. A round trip loses the
+  spread.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added
