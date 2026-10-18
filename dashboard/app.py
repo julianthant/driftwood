@@ -15,7 +15,7 @@ if root not in sys.path:
 
 from dashboard import charts, data  # noqa: E402
 from dashboard.formatting import compact_money, schedule_label, signal_label  # noqa: E402
-from dashboard.views import attribution_table  # noqa: E402
+from dashboard.views import attribution_table, shared_cost_bps  # noqa: E402
 from driftwood.config import database_path, load_env  # noqa: E402
 
 PAGES = ("Overview", "Backtest", "Execution", "Model / Signals", "Attribution", "Data")
@@ -51,7 +51,7 @@ def command(action: str, path: str, model: str = "ridge") -> str:
 
 def empty_state(message: str, commands: list[str]) -> None:
     st.info(message)
-    st.caption("Run from the repository root, then choose Refresh data in the sidebar.")
+    st.caption("Run from the repository root, then refresh in Settings.")
     st.code("\n".join(commands), language="bash")
 
 
@@ -60,11 +60,11 @@ def plot(chart) -> None:
         chart,
         width="stretch",
         theme=None,
-        config={"displaylogo": False, "scrollZoom": False},
+        config={"displaylogo": False, "scrollZoom": False, "displayModeBar": False},
     )
 
 
-def number(value: float, spec: str = ".3f") -> str:
+def number(value: float, spec: str = ".2f") -> str:
     return format(value, spec) if math.isfinite(value) else "—"
 
 
@@ -87,50 +87,35 @@ def get_backtest(path: str, model: str, revision: tuple) -> data.Backtest | None
 
 
 def overview(study: data.Study, path: str, model: str | None, revision: tuple) -> None:
-    metrics(
-        [
-            ("Universe · symbols", f"{len(study.coverage):,}"),
-            ("Observed sessions", f"{study.sessions:,}"),
-            ("First session", study.first.strftime("%d %b %Y")),
-            ("Last session", study.last.strftime("%d %b %Y")),
-        ]
-    )
+    st.caption(f"{study.first:%d %b %Y} - {study.last:%d %b %Y}")
+    headline = [("Universe", f"{len(study.coverage):,}"), ("Sessions", f"{study.sessions:,}")]
     if model:
         quality = quality_data(path, model, revision)
-        st.subheader("Signal evidence")
-        metrics(
+        headline.extend(
             [
-                ("Mean Spearman IC", number(quality.summary["mean_ic"])),
-                ("IC t-stat · Newey–West", number(quality.summary["hac_t_stat"], ".2f")),
-                ("Scored sessions", f"{quality.summary['n_dates']:,}"),
+                ("Mean IC", number(quality.summary["mean_ic"], ".3f")),
+                ("IC t-stat", number(quality.summary["hac_t_stat"])),
             ]
         )
-        st.caption(
-            f"Walk-forward predictions · {model} · label: {quality.label} · "
-            f"HAC lags: {quality.hac_lags}. IC measures ranking, before costs."
-        )
+    metrics(headline)
+    if model:
         result = get_backtest(path, model, revision)
         if result is not None:
             best = result.summary.sort_values("total_return", ascending=False).iloc[0]
-            st.subheader(f"Execution snapshot · {schedule_label(str(best['algo']))}")
+            st.subheader(f"Best sample return · {schedule_label(str(best['algo']))}")
             metrics(
                 [
-                    ("Total return", number(best["total_return"], ".2%")),
-                    ("Annualized Sharpe", number(best["sharpe"], ".2f")),
-                    ("Max drawdown", number(best["max_drawdown"], ".2%")),
-                    ("Fill cost · USD", compact_money(best["total_cost"])),
+                    ("Total return", number(best["total_return"], ".1%")),
+                    ("Sharpe", number(best["sharpe"])),
+                    ("Max drawdown", number(best["max_drawdown"], ".1%")),
+                    ("Fill cost", compact_money(best["total_cost"])),
                 ]
             )
             st.caption(
-                f"Fill cost: {number(best['cost_bps'], '.2f')} bps of "
-                f"{compact_money(best['total_traded_notional'])} traded notional. "
-                "Highest return in this sample, shown for orientation. "
-                "This is a retrospective comparison, not a schedule recommendation."
+                f"Fill cost: {number(best['cost_bps'], '.1f')} bps of traded notional."
             )
             plot(charts.equity_chart(result.daily))
-            st.caption(
-                "Growth of $1 after simulated fill costs. All schedules use the same scores."
-            )
+            st.caption("Growth of $1 after simulated fill costs.")
     else:
         empty_state(
             "Market data is ready. Train a model to see signal and execution evidence.",
@@ -139,67 +124,61 @@ def overview(study: data.Study, path: str, model: str | None, revision: tuple) -
                 command("train", path),
             ],
         )
-    st.subheader("From market data to a measured result")
-    st.markdown(
-        "**Daily bars → close-of-day features → purged walk-forward forecasts → "
-        "next-session C++ fills → signal attribution.**\n\n"
-        "Each forecast uses past training data. The backtest sizes at the signal close and fills "
-        "on the next session. Immediate, TWAP and VWAP share targets but pay different path prices "
-        "and costs. Attribution explains the target book’s next close-to-close return."
-    )
-    st.caption(
-        "Research limits: a fixed present-day universe has survivorship bias; "
-        "intraday paths are modeled from daily bars and impact is uncalibrated. "
-        "These are research results, not live performance."
-    )
 
 
-def backtest(path: str, model: str, revision: tuple) -> None:
+def backtest(path: str, model: str, revision: tuple, controls) -> None:
     result = get_backtest(path, model, revision)
     if result is None:
         return
     schedules = result.summary["algo"].astype(str).tolist()
-    selected = st.sidebar.selectbox("Schedule", schedules, format_func=schedule_label)
+    selected = controls.selectbox("Schedule", schedules, format_func=schedule_label)
     summary = result.summary.set_index("algo").loc[selected]
     daily = result.daily.loc[result.daily["algo"] == selected]
     metrics(
         [
-            ("Total return", number(summary["total_return"], ".2%")),
-            ("Annualized Sharpe", number(summary["sharpe"], ".2f")),
-            ("Max drawdown", number(summary["max_drawdown"], ".2%")),
-            ("Fill cost · USD", compact_money(summary["total_cost"])),
+            ("Total return", number(summary["total_return"], ".1%")),
+            ("Sharpe", number(summary["sharpe"])),
+            ("Max drawdown", number(summary["max_drawdown"], ".1%")),
+            ("Fill cost", compact_money(summary["total_cost"])),
         ]
     )
     st.caption(
-        f"Fill cost: {number(summary['cost_bps'], '.2f')} bps of "
+        f"Fill cost: {number(summary['cost_bps'], '.1f')} bps of "
         f"{compact_money(summary['total_traded_notional'])} traded notional."
     )
     st.subheader("Equity curve")
     plot(charts.equity_chart(daily))
-    st.caption(
-        "Growth of $1, marked to adjusted closing prices after spread, impact and commission."
-    )
-    st.subheader("Below the high-water mark")
+    st.caption("Growth of $1 after simulated fill costs.")
+    st.subheader("Drawdown")
     plot(charts.drawdown_chart(daily))
-    st.caption(
-        "Equity divided by its running peak minus one. Zero means a new high; "
-        "negative values show the loss from that high."
-    )
+    st.caption("Loss from the running equity peak.")
     with st.expander("Run assumptions and daily ledger"):
-        st.caption(
-            f"Saved {result.created_at} · Model {model}. "
-            "The ledger includes the initial flat period before predictions start."
-        )
+        st.caption(f"Saved {result.created_at:%d %b %Y}")
         st.json(result.config)
-        ledger = daily.copy()
+        ledger = daily[
+            ["date", "algo", "equity", "drawdown", "turnover", "cost", "traded_notional"]
+        ].copy()
         ledger["algo"] = ledger["algo"].map(schedule_label)
         st.dataframe(
-            ledger,
+            ledger.style.format(
+                {
+                    "equity": compact_money,
+                    "drawdown": "{:.1%}",
+                    "turnover": "{:.1%}",
+                    "cost": compact_money,
+                    "traded_notional": compact_money,
+                }
+            ),
             hide_index=True,
             width="stretch",
             column_config={
                 "algo": "Schedule",
-                "date": st.column_config.DateColumn("Session", format="YYYY-MM-DD"),
+                "date": st.column_config.DateColumn("Session", format="DD MMM YYYY"),
+                "equity": "Equity",
+                "drawdown": "Drawdown",
+                "turnover": "Turnover",
+                "cost": "Fill cost",
+                "traded_notional": "Traded notional",
             },
         )
 
@@ -216,122 +195,103 @@ def execution(path: str, model: str, revision: tuple) -> None:
                 command("backtest", path, model) + " --algos immediate twap vwap",
             ],
         )
-    st.subheader("Same targets, three execution schedules")
-    table = result.summary.drop(columns="model").rename(
+    table = result.summary.drop(columns=["model", "total_traded_notional"]).rename(
         columns={
             "algo": "Schedule",
             "total_return": "Total return",
             "sharpe": "Sharpe",
             "max_drawdown": "Max drawdown",
-            "avg_turnover": "Avg daily turnover",
-            "total_cost": "Cost (USD)",
+            "avg_turnover": "Turnover",
+            "total_cost": "Fill cost",
             "cost_bps": "Cost (bps)",
-            "total_traded_notional": "Traded notional",
         }
     )
     table["Schedule"] = table["Schedule"].map(schedule_label)
     st.dataframe(
         table.style.format(
             {
-                "Total return": "{:.2%}",
+                "Total return": "{:.1%}",
                 "Sharpe": "{:.2f}",
-                "Max drawdown": "{:.2%}",
-                "Avg daily turnover": "{:.2%}",
-                "Cost (USD)": compact_money,
-                "Cost (bps)": "{:.2f}",
-                "Traded notional": compact_money,
+                "Max drawdown": "{:.1%}",
+                "Turnover": "{:.1%}",
+                "Fill cost": compact_money,
+                "Cost (bps)": "{:.1f}",
             },
             na_rep="—",
         ),
         hide_index=True,
         width="stretch",
     )
-    st.caption(
-        "Sharpe uses zero risk-free rate and 252 sessions/year. Turnover is traded raw "
-        "notional divided by prior equity, averaged over the full stored window."
-    )
+    st.caption("Turnover is the average daily traded notional / prior equity.")
     plot(charts.comparison_chart(result.summary))
     st.subheader("Equity comparison")
     plot(charts.equity_chart(result.daily))
-    st.caption(
-        "Independent books with identical signals and starting capital. "
-        "The path inside each daily bar is simulated, not observed intraday trading."
-    )
-    st.subheader("Execution cost comparison")
-    plot(charts.comparison_chart(result.summary, costs=True))
-    st.caption(
-        "Fill cost includes spread, impact and commission. Basis points divide total cost by "
-        "actual raw traded notional, not initial capital. Equal bps can accompany different "
-        "dollar costs when schedules trade different notionals. Hover for unrounded dollar costs."
-    )
-    if "immediate" in set(result.summary["algo"]) and len(result.summary) > 1:
-        st.subheader("Cumulative cost relative to Immediate")
-        plot(charts.cost_chart(result.daily))
-        st.caption(
-            "Each line subtracts Immediate's cumulative fill cost on the same date. "
-            "Positive means more cost; negative means less. The dotted reference is $0 "
-            "difference. Market price moves are excluded."
+    st.subheader("Fill costs")
+    rate = shared_cost_bps(result.summary)
+    if rate is not None:
+        spread_only = (
+            result.config.get("impact_coef") == 0
+            and result.config.get("commission_per_share") == 0
         )
+        st.caption(
+            f"{number(rate, '.1f')} bps of traded notional across schedules"
+            + ("; spread only, no impact or commission." if spread_only else ".")
+        )
+    plot(charts.comparison_chart(result.summary, costs=True))
+    if "immediate" in set(result.summary["algo"]) and len(result.summary) > 1:
+        st.subheader("Cost relative to Immediate")
+        plot(charts.cost_chart(result.daily))
+        st.caption("Cumulative fill cost minus Immediate; positive means higher cost.")
 
 
 def model_quality(path: str, model: str, revision: tuple) -> None:
     quality = quality_data(path, model, revision)
     metrics(
         [
-            ("Mean Spearman IC", number(quality.summary["mean_ic"])),
-            ("IC t-stat · Newey–West", number(quality.summary["hac_t_stat"], ".2f")),
-            ("Positive IC sessions", number(quality.summary["hit_rate"], ".1%")),
+            ("Mean IC", number(quality.summary["mean_ic"], ".3f")),
+            ("IC t-stat", number(quality.summary["hac_t_stat"])),
+            ("Positive IC", number(quality.summary["hit_rate"], ".1%")),
         ]
     )
-    st.caption(f"Model: {model} · label: {quality.label} · HAC lags: {quality.hac_lags}.")
+    st.caption(f"Label: {quality.label} · Newey-West lags: {quality.hac_lags}")
     if not quality.label_known:
-        st.caption("Legacy predictions without label metadata use a five-lag allowance.")
+        st.caption("Legacy predictions: label unknown; five-lag allowance.")
     if not quality.summary["n_dates"]:
         empty_state(
             "No session has enough distinct forecasts and realized labels to compute IC.",
             [command("train", path, model)],
         )
         return
-    st.subheader("Did the forecast rank the cross-section correctly?")
+    st.subheader("Daily IC")
     plot(charts.ic_chart(quality.daily))
-    st.caption(
-        "Daily Spearman correlation across symbols, before costs. The darker line is a "
-        "63-session mean requiring a full window of valid ICs; undefined days remain gaps."
+    st.caption("Spearman rank correlation with a 63-session rolling mean.")
+    distribution, cumulative, coefficients = st.tabs(
+        ["Distribution", "Cumulative IC", "Coefficients"]
     )
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Distribution of daily IC")
+    with distribution:
         plot(charts.ic_histogram(quality.daily))
-        st.caption(
-            "A positive IC means higher forecasts ranked above lower forecasts "
-            "in realized returns. Missing ICs are excluded."
-        )
-    with right:
-        st.subheader("Cumulative IC")
+        st.caption("Positive IC means forecasts ranked realized returns correctly.")
+    with cumulative:
         plot(charts.ic_chart(quality.daily, cumulative=True))
-        st.caption(
-            "A running sum of valid daily ICs. This shows consistency of ranking; "
-            "it is not a compounded return or an equity curve."
-        )
-    st.subheader("What the model learned")
-    if quality.coefficients.empty:
-        st.info(
-            "No coefficients are available for this model. "
-            "Tree models do not provide linear coefficients; ridge stores them by fold."
-        )
-    else:
-        latest = quality.coefficients["fold"].max()
-        plot(
-            charts.contribution_chart(
-                quality.coefficients.loc[quality.coefficients["fold"] == latest], coefficient=True
+        st.caption("Sum of daily IC, not a compounded return.")
+    with coefficients:
+        if quality.coefficients.empty:
+            st.info("No linear coefficients are available for this model.")
+        else:
+            latest = quality.coefficients["fold"].max()
+            plot(
+                charts.contribution_chart(
+                    quality.coefficients.loc[quality.coefficients["fold"] == latest],
+                    coefficient=True,
+                )
             )
-        )
-        st.caption(
-            f"Latest fold ({latest}). Linear weights multiply the day's feature z-scores; "
-            "their size is not a causal effect."
-        )
-        with st.expander("All fold coefficients"):
-            st.dataframe(quality.coefficients, hide_index=True, width="stretch")
+            st.caption(f"Fold {latest}: weights on standardized features.")
+            with st.expander("All fold coefficients"):
+                st.dataframe(
+                    quality.coefficients.style.format({"weight": "{:.2e}"}),
+                    hide_index=True,
+                    width="stretch",
+                )
 
 
 def attribution(path: str, model: str, revision: tuple) -> None:
@@ -351,26 +311,27 @@ def attribution(path: str, model: str, revision: tuple) -> None:
         [
             ("Signal close", result.signal_date.strftime("%d %b %Y")),
             ("Next close", result.next_date.strftime("%d %b %Y")),
-            ("Target-book return", number(result.portfolio_return, ".2%")),
+            ("Book return", number(result.portfolio_return, ".1%")),
         ]
     )
     st.subheader("Contributions by signal")
     plot(charts.contribution_chart(result.by_signal))
+    st.caption("Next close-to-close target-book return, before execution costs.")
     st.caption(
-        "Contributions add to the target book's next close-to-close return, in basis points. "
-        "This accounting excludes execution costs and differs from filled backtest P&L."
+        "No stored coefficients; attribution uses unit feature weights."
+        if result.note.startswith("No coefficients")
+        else result.note.split(". ")[0].rstrip(".") + "."
     )
-    st.write(result.note)
-    st.caption(
-        "Attribution uses the library defaults: gross target 1.0 and max weight 10%. "
-        "It is computed from the latest eligible scored session; no report file is required."
-    )
+    if "Feature rows are missing" in result.note or "No feature row" in result.note:
+        st.caption("Signal-day features are missing; the return is unattributed.")
+    elif "None of the coefficient columns" in result.note:
+        st.caption("No matching feature columns; the return is unattributed.")
     table = attribution_table(result.by_signal)
     table["signal"] = table["signal"].map(signal_label)
     table["Contribution (bps)"] = table.pop("contribution") * 10_000
     st.table(
         table.rename(columns={"signal": "Signal"})
-        .style.format({"Contribution (bps)": "{:.2f}"})
+        .style.format({"Contribution (bps)": "{:.1f}"})
         .hide(axis="index"),
         border="horizontal",
     )
@@ -381,45 +342,36 @@ def market_data(study: data.Study) -> None:
     possible = len(study.coverage) * study.sessions
     metrics(
         [
-            ("Universe · symbols", f"{len(study.coverage):,}"),
-            ("Observed sessions", f"{study.sessions:,}"),
+            ("Universe", f"{len(study.coverage):,}"),
+            ("Sessions", f"{study.sessions:,}"),
             ("Observed symbol-days", f"{observed:,}"),
             ("Missing symbol-days", f"{possible - observed:,}"),
         ]
     )
-    st.caption(
-        f"{study.first:%d %b %Y} – {study.last:%d %b %Y} · "
-        "Universe includes requested symbols with no bars."
-    )
+    st.caption(f"{study.first:%d %b %Y} - {study.last:%d %b %Y}")
     st.subheader("Sessions per symbol")
     plot(charts.coverage_chart(study.coverage))
-    st.caption(
-        "The number of stored daily bars for each symbol. Shorter histories deserve a check."
-    )
     st.dataframe(
-        study.coverage.sort_values(["sessions", "symbol"]),
+        study.coverage.sort_values(["sessions", "symbol"]).style.format(
+            {"sessions": "{:,.0f}", "missing": "{:,.0f}"}
+        ),
         hide_index=True,
         width="stretch",
         column_config={
             "symbol": "Symbol",
             "sessions": "Sessions",
             "missing": "Missing sessions",
-            "first": st.column_config.DateColumn("First session", format="YYYY-MM-DD"),
-            "last": st.column_config.DateColumn("Last session", format="YYYY-MM-DD"),
+            "first": st.column_config.DateColumn("First session", format="DD MMM YYYY"),
+            "last": st.column_config.DateColumn("Last session", format="DD MMM YYYY"),
         },
     )
-    st.subheader("Where observations are missing")
+    st.subheader("Missing data")
     if possible == observed:
         st.success("No missing symbol-days")
     else:
         affected = study.missing.loc[study.missing.gt(0).any(axis=1)]
         plot(charts.missing_chart(affected))
-    st.caption(
-        "Monthly fraction of missing observations relative to dates seen for any symbol "
-        "in this database. Includes gaps before listing and after the last observation. "
-        "This is not an exchange-calendar audit: a session missing for every symbol "
-        "cannot be detected here."
-    )
+        st.caption("Monthly gaps relative to sessions observed for any symbol.")
 
 
 def main() -> None:
@@ -432,32 +384,19 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.sidebar.title("driftwood")
-    st.sidebar.caption("Quantitative research workbench")
+    st.sidebar.caption("Research · read only")
     page = st.sidebar.radio("Research", PAGES)
-    path = str(
-        Path(st.sidebar.text_input("Database path", value=str(database_path())))
-        .expanduser()
-        .resolve()
-    )
-    model_slot = st.sidebar.empty()
-    if st.sidebar.button("Refresh data", width="stretch"):
-        for loader in (study_data, quality_data, backtest_data, attribution_data):
-            loader.clear()
+    controls = st.sidebar.container()
     st.sidebar.divider()
-    st.sidebar.caption(
-        "Read only · Local study\n\nNo credentials required. All fills are simulated."
-    )
-    st.title(page)
-    st.caption(
-        {
-            "Overview": "The research pipeline, from universe coverage to execution outcomes.",
-            "Backtest": "Follow one schedule through returns, costs and drawdowns.",
-            "Execution": "Compare how execution timing changes the same target portfolio.",
-            "Model / Signals": "Inspect out-of-sample ranking quality across walk-forward folds.",
-            "Attribution": "Understand which signals contributed to the latest eligible session.",
-            "Data": "Inspect the history underneath every forecast and fill.",
-        }[page]
-    )
+    with st.sidebar.expander("Settings"):
+        path = str(Path(st.text_input("Database path", value=str(database_path()))).expanduser())
+        path = str(Path(path).resolve())
+        if st.button("Refresh data", width="stretch"):
+            for loader in (study_data, quality_data, backtest_data, attribution_data):
+                loader.clear()
+    source_slot = st.sidebar.empty()
+    source_slot.caption("Simulated fills only")
+    st.title("Model / signals" if page == "Model / Signals" else page)
     if not Path(path).is_file():
         empty_state(
             "No database at this path. Create an offline study to get started:",
@@ -474,16 +413,9 @@ def main() -> None:
     try:
         with st.spinner("Reading the study…"):
             study = study_data(path, revision)
-        model = model_slot.selectbox("Model", study.models) if study.models else None
+        model = controls.selectbox("Model", study.models) if study.models else None
         source = ", ".join(study.sources)
-        st.caption(
-            f"Source: {source} · "
-            + (
-                "Synthetic data is an offline demonstration, not evidence of trading edge."
-                if "synthetic" in study.sources
-                else "Historical study; simulated execution."
-            )
-        )
+        source_slot.caption(f"{source} · simulated fills")
         if page == "Data":
             market_data(study)
         elif page == "Overview":
@@ -496,9 +428,10 @@ def main() -> None:
                     command("train", path),
                 ],
             )
+        elif page == "Backtest":
+            backtest(path, model, revision, controls)
         else:
             {
-                "Backtest": backtest,
                 "Execution": execution,
                 "Model / Signals": model_quality,
                 "Attribution": attribution,

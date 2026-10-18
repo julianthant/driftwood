@@ -63,7 +63,18 @@ def test_model_picker_starts_on_a_saved_backtest(tmp_path, monkeypatch):
     picker = next(item for item in at.sidebar.selectbox if item.label == "Model")
     assert picker.value == "ridge"
     assert len(at.get("plotly_chart")) == 1
+    settings = next(item for item in at.sidebar.expander if item.label == "Settings")
+    assert not settings.proto.expanded
+    assert settings.text_input[0].label == "Database path"
+    assert settings.button[0].label == "Refresh data"
+    at.sidebar.radio[0].set_value("Backtest").run()
+    assert not at.exception
+    assert [item.label for item in at.sidebar.selectbox] == ["Model", "Schedule"]
+    at.sidebar.radio[0].set_value("Execution").run()
+    assert not at.exception
+    assert any("spread only, no impact or commission" in item.value for item in at.caption)
     at.sidebar.radio[0].set_value("Model / Signals").run()
+    assert [item.label for item in at.tabs] == ["Distribution", "Cumulative IC", "Coefficients"]
     assert not any("Legacy predictions" in item.value for item in at.caption)
     at.sidebar.radio[0].set_value("Overview").run()
     picker = next(item for item in at.sidebar.selectbox if item.label == "Model")
@@ -119,6 +130,19 @@ def test_comparison_charts_keep_schedule_names_colors_and_units():
     assert len(charts.comparison_chart(summary).data) == 3
 
 
+def test_equal_cost_rate_omits_redundant_bars_but_preserves_dollar_costs():
+    summary = pd.DataFrame(
+        {
+            "algo": ["immediate", "twap", "vwap"],
+            "total_cost": [100, 200, 150],
+            "cost_bps": [1.0, 1.0, 1.0],
+        }
+    )
+    costs = charts.comparison_chart(summary, costs=True)
+    assert len(costs.data) == 1
+    assert list(costs.data[0].y) == [100, 200, 150]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -151,4 +175,4 @@ def test_coverage_chart_sorts_shorter_histories_first():
     frame = pd.DataFrame({"symbol": ["CCC", "AAA", "BBB"], "sessions": [15, 5, 15]})
     chart = charts.coverage_chart(frame)
     assert list(chart.data[0].x) == ["AAA", "BBB", "CCC"]
-    assert chart.layout.height <= 260
+    assert chart.layout.height == charts.CHART_HEIGHT

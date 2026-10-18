@@ -236,7 +236,7 @@ def test_all_dashboard_pages_render_and_schedule_switches(study_db, monkeypatch)
     schedule.set_value("twap").run()
     assert not at.exception
     expected_return = result.summary.set_index("algo").loc["twap", "total_return"]
-    assert at.metric[0].value == f"{expected_return:.2%}"
+    assert at.metric[0].value == f"{expected_return:.1%}"
 
 
 @pytest.mark.parametrize("state", ["missing", "empty", "corrupt", "bars_only"])

@@ -7,7 +7,7 @@ textColor = "#172b4d"
 font = "sans serif"
 
 [client]
-toolbarMode = "viewer"
+toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
