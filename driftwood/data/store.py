@@ -19,15 +19,17 @@ from driftwood.data.schema import BAR_COLUMNS, DDL
 class MarketStore:
     """A DuckDB file holding bars, the universe used for a study, and ingest runs."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path: str | Path
         if str(path) == ":memory:":
             self.path = ":memory:"
         else:
             self.path = Path(path)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = duckdb.connect(str(self.path))
-        self._con.execute(DDL)
+            if not read_only:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._con = duckdb.connect(str(self.path), read_only=read_only)
+        if not read_only:
+            self._con.execute(DDL)
 
     def close(self) -> None:
         if self._con is not None:

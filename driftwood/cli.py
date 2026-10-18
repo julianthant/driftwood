@@ -13,6 +13,7 @@ from driftwood.agent.graph import run_session
 from driftwood.agent.model import build_chat_model
 from driftwood.attribution import attribute_store, write_attribution_report
 from driftwood.backtest import BacktestConfig, run_backtest, write_backtest_report
+from driftwood.backtest.persist import input_signature, write_backtest
 from driftwood.config import database_path, load_env
 from driftwood.data.ingest import ingest_synthetic, ingest_yfinance
 from driftwood.data.store import MarketStore
@@ -391,6 +392,7 @@ def _backtest(args: argparse.Namespace) -> int:
             features = read_features(store)
         except RuntimeError:
             features = None
+        signature = input_signature(store, args.model)
     chosen = predictions.loc[predictions["model"] == args.model]
     if chosen.empty:
         print(f"no predictions for model {args.model}", file=sys.stderr)
@@ -412,6 +414,8 @@ def _backtest(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    with MarketStore(path) as store:
+        write_backtest(store, result, model=args.model, signature=signature)
     print(result.summary.to_string(index=False))
     if args.report:
         report = write_backtest_report(result, Path(args.report))

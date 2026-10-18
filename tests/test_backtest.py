@@ -10,6 +10,7 @@ from driftwood.backtest import BacktestConfig, run_backtest, write_backtest_repo
 from driftwood.backtest.engine import summarize
 from driftwood.backtest.prices import adjusted_ohlc
 from driftwood.cli import main
+from driftwood.data.store import MarketStore
 from driftwood.data.synthetic import synthetic_bars
 from driftwood.execution import execute_order
 
@@ -249,6 +250,11 @@ def test_backtest_command_writes_the_comparison(tmp_path) -> None:
     text = (report / "backtest.md").read_text(encoding="utf-8")
     assert "t+1" in text
     assert "immediate" in text and "twap" in text and "vwap" in text
+    assert main(["backtest", "--db", str(db), "--algos", "twap"]) == 0
+    with MarketStore(db, read_only=True) as store:
+        saved = store.execute("SELECT * FROM backtest_summary").df()
+        assert saved["algo"].tolist() == ["twap"]
+        assert store.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 1
     assert main(["backtest", "--db", str(tmp_path / "empty.duckdb")]) == 1
 
 
