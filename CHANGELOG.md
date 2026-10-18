@@ -24,6 +24,11 @@ the milestone that introduced them.
 ### Fixed
 
 - macOS CI installs Homebrew `libomp` so the LightGBM wheel can load.
+- A training row is dropped when that name's forward return lands in the
+  test window because the name skipped a session inside the purge. The
+  day's label mean is taken after the drop.
+- `--label-horizon` cannot be shorter than the label being scored. The IC
+  note says the pooled slope t-stat is not a test that the book made money.
 
 ## [0.2.0] - 2026-10-18
 

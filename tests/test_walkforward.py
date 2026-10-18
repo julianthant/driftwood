@@ -127,6 +127,62 @@ def test_a_fold_ignores_labels_from_its_embargo_and_its_test_window() -> None:
             _assert_same_forecast(original, rerun)
 
 
+def test_a_skipped_session_cannot_pull_a_test_price_into_the_fit() -> None:
+    """A calendar purge does not cover a name that skips the embargo session.
+
+    The label is the next stored print. If that print is inside the test
+    window, changing the test price must not move this fold's forecast.
+    """
+
+    rng = np.random.default_rng(0)
+    dates = list(pd.bdate_range("2020-01-01", periods=40))
+    symbols = ["AAA", "BBB", "CCC", "DDD"]
+    config = WalkForwardConfig(min_train_days=15, test_days=8, embargo_days=1, label_horizon=1)
+    fold = next(iter_folds(dates, config))
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        prices = 100 * np.exp(np.cumsum(rng.normal(0.0, 0.01, len(dates))))
+        shock = rng.normal(size=len(dates))
+        for i, date in enumerate(dates):
+            if symbol == "CCC" and date in set(fold.embargo_dates):
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": date,
+                    "z_x": float(shock[i]),
+                    "px": float(prices[i]),
+                }
+            )
+    panel = pd.DataFrame(rows)
+
+    def labeled(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame.sort_values(["symbol", "date"]).copy()
+        grouped = out.groupby("symbol", sort=False)["px"]
+        out["fwd_ret_1d"] = grouped.shift(-1) / out["px"] - 1.0
+        return out.loc[:, ["symbol", "date", "z_x", "fwd_ret_1d"]]
+
+    original = labeled(panel)
+    bumped = panel.copy()
+    bumped.loc[bumped["date"] >= fold.test_dates[0], "px"] *= 1.8
+    changed = labeled(bumped)
+    # The gappy name's training label really does contain a test price.
+    ccc = original.loc[original["symbol"] == "CCC"].sort_values("date")
+    leaked = ccc.loc[ccc["date"] == fold.train_dates[-1], "fwd_ret_1d"].iloc[0]
+    rebuilt = changed.loc[
+        (changed["symbol"] == "CCC") & (changed["date"] == fold.train_dates[-1]),
+        "fwd_ret_1d",
+    ].iloc[0]
+    assert leaked != pytest.approx(rebuilt)
+
+    def factory() -> RidgeModel:
+        return RidgeModel(alpha=1e-6)
+
+    first = walk_forward(original, ["z_x"], "fwd_ret_1d", factory, config)
+    second = walk_forward(changed, ["z_x"], "fwd_ret_1d", factory, config)
+    _assert_same_forecast(first, second, 0)
+
+
 def test_momentum_baseline_copies_the_feature_and_ignores_the_target() -> None:
     frame = _panel(n_names=6, n_dates=50, noise=0.0, seed=4)
     garbage = frame.copy()

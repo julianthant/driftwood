@@ -158,7 +158,8 @@ The purge is the embargo, and it is at least the label horizon. `fwd_ret_1d`
 on the day before the test is the return from that close to the first test
 close. If that row is in the training set, the model has already seen part
 of the test outcome. Five purged sessions is the default, which also covers
-`fwd_ret_5d`.
+`fwd_ret_5d`. A name that misses a session can step over that calendar gap.
+The fit drops any training row whose own forward print falls on a test date.
 
 The training window expands by default. After a test quarter has happened,
 the next fold may train on it. That is not leakage. Those returns are in the
@@ -603,8 +604,13 @@ an embargo of 5, and a horizon inferred from the label (1 or 5). The window
 expands. `--rolling` with `--train-days` (default 756) is the alternative.
 The label is demeaned within each date before the fit, so the target is a
 relative return, and that mean uses only names on that date. It does not
-use other dates. Out-of-sample predictions are the only rows stored.
-In-sample mean Spearman IC is one summary number on the result.
+use other dates. Before that mean, a training row is dropped when that
+name's own label ends on or after the first test session. The purge is a
+shared-calendar gap. A name that skips a session steps over it, because the
+forward return is the next stored print, and that print can fall inside the
+test. On a complete calendar the extra drop removes nothing. Out-of-sample
+predictions are the only rows stored. In-sample mean Spearman IC is one
+summary number on the result.
 
 **Alternatives.**
 
@@ -624,7 +630,10 @@ rolling option exists for that reason. It is not the default, because with
 fifty names the early years are already short. Demeaning inside the day
 makes the target match a long-short book, and it also means one name's
 label moves the target of the other names that day. Those other labels are
-realized at the same time. They are not future days.
+realized at the same time. They are not future days. A name whose own label
+reaches the test is not in that mean. The command also refuses a
+`--label-horizon` shorter than the label, so the row check looks at least
+as far as the label was built.
 
 **Why this one.** It is how the book would have been run. The test scrambles
 every label after a fold's last training date and requires that fold's
@@ -863,8 +872,10 @@ the last training day is the move from that close to the next close, and the
 next close is inside the test window. If I train on that row, I have peeked.
 The purge is the embargo I asked for, and at least the number of sessions
 the label looks ahead. The default embargo is five days, which also covers
-the five-day label. The test scrambles every label after the training cutoff
-and the forecast is not allowed to move."
+the five-day label. If a name skipped a session, its next print can land
+inside the test even when the calendar gap looks wide enough, and that row
+is dropped before the fit. The test scrambles every label after the training
+cutoff and the forecast is not allowed to move."
 
 ### What is an information coefficient, and how is it different from a regression?
 
