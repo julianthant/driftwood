@@ -14,3 +14,9 @@ the milestone that introduced them.
 - A fixed research universe of 50 liquid US stocks, plus a deterministic synthetic book for offline use.
 - An exploratory notebook, a `driftwood ingest` command, and design notes for the data stage.
 - Continuous integration that lints and runs the test suite on Linux, Windows, and macOS.
+
+### Changed
+
+- The data notes now match the current yfinance feed. With auto-adjust off,
+  OHLC is already split-adjusted and `adj_close` also reflects dividends.
+  The synthetic book is still the example where a raw split looks like a crash.
