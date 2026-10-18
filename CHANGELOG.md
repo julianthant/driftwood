@@ -76,6 +76,10 @@ the milestone that introduced them.
 - `driftwood train`, which writes out-of-sample predictions to the study
   database. Retraining one model leaves the other models' rows in place.
 
+### Fixed
+
+- macOS CI installs Homebrew `libomp` so the LightGBM wheel can load.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added
