@@ -1,9 +1,11 @@
 """DuckDB table definitions for daily bars.
 
-One row is one symbol on one session. Prices are the vendor's prints:
-``open``/``high``/``low``/``close`` are unadjusted, and ``adj_close`` is the
-split- and dividend-adjusted close. Both are kept so a later stage can show
-what an adjustment changed instead of throwing the raw print away.
+One row is one symbol on one session. ``close`` is the vendor close stored
+beside ``adj_close``. Current yfinance, even with auto-adjust off, returns
+split-adjusted OHLC, and ``adj_close`` is that series after dividends as
+well. The synthetic book is different on purpose: its raw close jumps on a
+split and ``adj_close`` does not. Both columns are kept so that difference
+stays visible.
 """
 
 from __future__ import annotations
