@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "driftwood"
-version = "0.5.0"
+version = "0.6.0"
 description = "A learning-focused quantitative research and paper-trading pipeline for US stocks."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,8 @@ dependencies = [
     "scikit-learn>=1.4",
     "statsmodels>=0.14",
     "lightgbm>=4.3",
+    "alpaca-py>=0.30",
+    "streamlit>=1.32",
 ]
 
 [tool.scikit-build]
