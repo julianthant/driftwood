@@ -6,6 +6,22 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-18
+
+### Added
+
+- A paper-only order plan. `driftwood paper` prints next-session share
+  deltas and does not construct a broker client. `--submit` sends DAY
+  market orders to `https://paper-api.alpaca.markets` and refuses any
+  other host before a client exists.
+- Submit re-reads paper equity and positions, and it refuses to send
+  while that market is open unless `--allow-while-open` is set.
+- Fold coefficients stored beside predictions, replaced per model.
+- An attribution that splits the target book's close-to-close return
+  across signals and sums back to that return. `driftwood attribute`
+  writes the note.
+- A read-only Streamlit page in `dashboard/`. It does not send orders.
+
 ## [0.5.0] - 2026-10-18
 
 ### Added
