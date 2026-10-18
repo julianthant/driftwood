@@ -6,6 +6,27 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+### Added
+
+- Six read-only dashboard pages: Overview, Backtest, Execution,
+  Model / Signals, Attribution, and Data, with native Streamlit controls,
+  interactive Plotly charts, a light navy and teal theme, and CLI recovery
+  commands for empty or stale studies.
+- Per-model DuckDB backtest snapshots with daily equity, returns, costs,
+  turnover, summary, configuration, timestamp, and an input signature.
+  CLI backtests save these even without `--report`; reruns replace that
+  model's schedule set and preserve other models.
+- Stored prediction label metadata for horizon-aware IC diagnostics.
+
+### Changed
+
+- Dashboard reads use bounded memory caches with a five-minute expiry,
+  database and WAL revision keys, and a manual Refresh data control.
+- Corrected bars, model scores, or signal-date volatility require a fresh
+  backtest before the dashboard displays its saved results.
+- Runtime dependencies include Plotly 5.18 or newer and Streamlit 1.51 or
+  newer.
+
 ## [0.7.0] - 2026-10-18
 
 ### Added
