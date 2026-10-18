@@ -6,6 +6,30 @@ the milestone that introduced them.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+### Added
+
+- A walk-forward ridge model on the cross-sectional z-scores, a 12-minus-1
+  momentum baseline that does not fit a coefficient, and a small
+  deterministic LightGBM check.
+- A purge between train and test of at least the label horizon, so a
+  forward return cannot reach into the window being scored.
+- An information-coefficient report: daily Spearman IC as the headline,
+  Pearson beside it, a pooled regression labeled as a different statistic,
+  and a Newey-West t-stat for overlapping labels.
+- `driftwood train`, which writes out-of-sample predictions to the study
+  database. Retraining one model leaves the other models' rows in place.
+
+### Fixed
+
+- macOS CI installs Homebrew `libomp` so the LightGBM wheel can load.
+- A training row is dropped when that name's forward return lands in the
+  test window because the name skipped a session inside the purge. The
+  day's label mean is taken after the drop.
+- `--label-horizon` cannot be shorter than the label being scored. The IC
+  note says the pooled slope t-stat is not a test that the book made money.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added
