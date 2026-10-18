@@ -20,6 +20,16 @@ the milestone that introduced them.
 
 ### Changed
 
+- Dashboard model selection starts with saved backtests and prefers ridge
+  within each availability group. Schedule comparisons use consistent labels,
+  colors, and line styles, with separate performance and cost panels.
+- Execution costs show USD, basis points of actual traded notional, and
+  cumulative differences from Immediate. Zero traded notional leaves cost
+  bps missing; large currency KPIs use compact labels.
+- Signal labels, coefficient units, and attribution totals are clearer.
+  Coverage tables use dates without times; complete coverage replaces the
+  heatmap with "No missing symbol-days", and partial heatmaps show affected
+  symbols only. The viewer toolbar hides Deploy.
 - Dashboard reads use bounded memory caches with a five-minute expiry,
   database and WAL revision keys, and a manual Refresh data control.
 - Corrected bars, model scores, or signal-date volatility require a fresh

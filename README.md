@@ -203,17 +203,27 @@ with a light navy and teal theme:
 | --- | --- |
 | Overview | Study coverage, signal metrics, normalized equity, and the research pipeline |
 | Backtest | One schedule's equity, drawdown, saved assumptions, and daily ledger |
-| Execution | Immediate, TWAP, and VWAP returns, turnover, and cumulative fill costs |
+| Execution | Immediate, TWAP, and VWAP performance, turnover, USD and bps costs, and cumulative cost differences |
 | Model / Signals | Daily and 63-session rolling IC, its distribution and cumulative sum, and fold coefficients |
 | Attribution | The latest eligible session's signal contributions and their total |
 | Data | Symbol coverage and monthly missing-observation fractions |
 
 Use the sidebar to select a page, set **Database path**, and select a
-**Model** when predictions exist. **Schedule** appears on Backtest.
+**Model** when predictions exist. Models with saved backtests appear first,
+with ridge preferred within each availability group. You can select any listed
+model. **Schedule** appears on Backtest.
 **Refresh data** clears the memory caches. Cached reads expire after five
 minutes and use bounded entries keyed by path, model where relevant, and
 the database and WAL file revisions. The app opens `MarketStore` with
 `read_only=True`; it needs no broker or API keys.
+
+Schedule lines use Immediate in solid teal, TWAP in dashed blue, and VWAP in
+dotted purple. Execution compares return, Sharpe, and max drawdown separately.
+Cost in basis points is total fill cost divided by actual traded notional,
+times 10,000. Zero traded notional leaves that value missing. Cumulative cost
+differences subtract Immediate on the same date; Immediate is the labeled
+zero reference. Dollar costs remain precise in data and hover, while large
+currency KPIs use compact labels.
 
 Create a complete offline demo after installing the package. These commands
 use the built-in 50-symbol universe, 504 synthetic sessions, and shorter
@@ -251,7 +261,9 @@ Legacy predictions without label metadata are labeled and use five lags.
 Coverage includes requested symbols with no bars. Monthly missing fractions
 use the union of dates observed for any symbol, including gaps before or
 after a name's history. This cannot detect a session missing for every name
-and is not an exchange-calendar audit.
+and is not an exchange-calendar audit. Complete coverage shows **No missing
+symbol-days** in place of a heatmap. When gaps exist, the heatmap shows only
+affected symbols. Coverage tables show dates without times.
 
 ## Run a study
 
