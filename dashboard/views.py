@@ -44,3 +44,31 @@ def orders_table(orders: pd.DataFrame) -> pd.DataFrame:
     if orders.empty:
         return pd.DataFrame(columns=columns)
     return orders.loc[:, columns].reset_index(drop=True)
+
+
+def backtest_series(daily: pd.DataFrame) -> pd.DataFrame:
+    """Add normalized equity, underwater drawdown and accumulated fill costs."""
+    frame = daily.sort_values(["algo", "date"]).copy()
+    grouped = frame.groupby("algo", sort=False)
+    frame["growth"] = frame["equity"] / grouped["equity"].transform("first")
+    frame["drawdown"] = frame["equity"] / grouped["equity"].cummax() - 1.0
+    frame["cumulative_cost"] = grouped["cost"].cumsum()
+    return frame
+
+
+def ic_series(daily: pd.DataFrame, window: int = 63) -> pd.DataFrame:
+    """A full-window rolling mean; undefined ICs stay missing, including in the sum."""
+    frame = daily.sort_values("date").copy()
+    frame["rolling_ic"] = frame["ic"].rolling(window, min_periods=window).mean()
+    frame["cumulative_ic"] = frame["ic"].cumsum()
+    return frame
+
+
+def missing_by_month(dates: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    """Missing fraction relative to sessions observed anywhere in this database."""
+    frame = dates.loc[:, ["symbol", "date"]].drop_duplicates().copy()
+    frame["month"] = pd.to_datetime(frame["date"]).dt.to_period("M").dt.to_timestamp()
+    sessions = frame.drop_duplicates("date").groupby("month").size()
+    counts = frame.groupby(["symbol", "month"]).size().unstack("month")
+    counts = counts.reindex(index=symbols, columns=sessions.index).fillna(0)
+    return 1.0 - counts.div(sessions, axis="columns")
