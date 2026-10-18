@@ -34,6 +34,8 @@ flowchart LR
   predictions[(predictions table)]
   report[IC report]
   sim[C++ fill simulator]
+  backtest[Next-session backtest]
+  compare[Immediate vs TWAP vs VWAP]
   notebook[Exploratory notebook]
 
   universe --> ingest
@@ -48,13 +50,17 @@ flowchart LR
   labels --> train
   train --> predictions
   predictions --> report
-  bars --> sim
+  predictions --> backtest
+  bars --> backtest
+  features --> backtest
+  backtest --> sim
+  backtest --> compare
   bars --> notebook
 ```
 
-The simulator is not wired to the predictions yet. It prices one order
-against one bar. A backtest that would connect them is the next stage, and
-it is not in this diagram because it does not exist.
+The backtest reads the prediction column, the adjusted bar, and `vol_21`
+from the signal date. It does not read the label. The simulator still
+prices one order at a time. The three schedules do not share a fill.
 
 A study is one DuckDB file. The default path is `data/driftwood.duckdb`
 (`DRIFTWOOD_DB` overrides it). Rebuilding the file is always allowed; nothing
@@ -75,6 +81,9 @@ Commands that write the file:
 - `driftwood.execution.execute_order` prices one order by calling
   `driftwood._sim`. Installing the package builds that module. There is no
   separate compile command.
+- `driftwood backtest` reads bars, predictions, and `vol_21`, and writes a
+  comparison of the three schedules. It trades `prediction`. The label
+  stored beside it is not an input.
 
 ## Finance concepts in plain language
 
@@ -257,6 +266,49 @@ comes out flat. The impact term is a square-root shape in the spirit of
 Almgren-Chriss. The coefficient is not calibrated to anything. It is there
 so a larger slice of a bin costs more than a smaller slice, and so the
 unit can be explained.
+
+### The backtest clock
+
+The decision and the fill are on different sessions. At the close of day
+`t` the score is known, the adjusted close is known, and `vol_21` is known.
+Target weights are built from that cross-section. Share counts are
+`weight * equity / close`, using that same close, so the order does not
+depend on tomorrow's open. The order is handed to the simulator with
+tomorrow's adjusted bar. Tomorrow's sigma is not consulted.
+
+The equity recorded on day `t` already includes the close of day `t`. The
+new order cannot collect the move from day `t-1` to day `t`, because that
+move was marked before the order existed. A test builds a bar whose open
+is the old price and whose close has jumped, puts the score on that close,
+and requires the equity not to jump. The fill shows up on the next session,
+at the next session's price.
+
+Dates with fewer than two scores do not generate a new target. The book
+holds. An order that was already queued still fills. The last close in the
+file generates orders that have no next session, and those orders are
+dropped. There is no trade on a day that does not exist.
+
+### Dollar-neutral weights, Sharpe, drawdown, turnover
+
+Dollar-neutral here means the weights are built from the score minus that
+day's average score, so the raw book is long the winners and short the
+laggards in equal dollars. Gross exposure is the sum of absolute weights.
+A cap then limits each name. The cap is applied once, and any room under
+the cap is filled once, in proportion, on the side the name already had.
+Names that were exactly zero stay zero. If the cap binds, the gross can
+finish short of the target and the net can finish away from zero. A second
+pass would either break the cap or quietly change the book. One pass keeps
+both facts visible.
+
+The Sharpe ratio in the report is the mean daily strategy return divided
+by its sample standard deviation, multiplied by the square root of 252.
+The risk-free rate is zero. A constant return has no standard deviation
+and the Sharpe is reported as missing, not as infinity. Max drawdown is
+the lowest value of equity divided by the running peak, minus one. A loss
+is a negative number. Turnover is the raw notional traded that day divided
+by the equity the order was sized on. Cost is what the fill charged beyond
+the raw price, plus commission. A day when the market moved and the
+schedule did not pay a spread can have a return and a cost of zero.
 
 ## Decision log
 
@@ -853,6 +905,135 @@ pass volatility known before the session.
 **Why this one.** The native module is allowed to know how to walk a bar.
 It is not allowed to know what a feature is.
 
+### ADR-016 — Dollar-neutral weights, clipped once
+
+**Context.** A cross-sectional score is not a portfolio. If I hand the raw
+score to the fill, every name is a long, the book is not the thing the IC
+measured, and one large score sets the size. The construction has to be
+explainable in a sentence and it has to have a cap that a test can see
+being respected.
+
+**Decision.** Demean the day's scores. Scale so the sum of absolute
+weights equals the gross target (default 1, meaning fully invested on a
+long-short basis). Clip each name to `max_weight` (default 0.1). Then, once,
+give any leftover gross to names that still have room under the cap, on
+the side they already had. A missing score is dropped. A flat cross-section
+is a flat book. Fewer than two names is not a new target; the backtest
+holds what it has.
+
+**Alternatives.**
+
+- Rank weights, or a long-only top quintile. A reasonable book, and a
+  different one from the IC, which scored every name. I want the backtest
+  to trade the ranking the IC measured.
+- An optimizer with a covariance matrix, sector bounds, and a turnover
+  penalty. That is a second research project. It would also hide whether
+  a bad day came from the score or from the optimizer.
+- Iterating the clip until the gross is exact. The last iteration is where
+  a name gets pushed back through the cap, or where the net is forced to
+  zero by resizing a side that the score did not ask to resize. I would
+  rather report a gross of 0.8 than pretend the cap and the gross were
+  both met.
+
+**Tradeoff.** After the cap, the book can have a net long or a net short,
+and it can be under-invested. With fifty names and a 10 percent cap the
+target gross is reachable. With two names it is not, and the command's
+help is the wrong place to hide that. The caller raises `--max-weight` for
+a toy universe. There is no sector bound and no beta bound. The deadband
+(`min_trade_dollars`) lives in the backtest, not in the weight function,
+because it is about an existing position rather than about the target.
+
+**Why this one.** The pre-cap book is dollar-neutral by arithmetic, not by
+a solver. The cap is a single `clip`. A test with a symmetric score checks
+the gross and the net. A test with a tight cap checks that the gross is
+left short rather than the cap being broken.
+
+### ADR-017 — Size on today's close, fill on the next session
+
+**Context.** The features and the score are stamped at the close. Filling
+them against that same bar, even at the open of that bar, collects a move
+the decision could not have used. The open of day `t` is before the close
+of day `t`. A score that uses the close is not allowed to trade the open
+of the same session.
+
+**Decision.** The backtest loop, for each session, does three things in
+this order. Fill the orders that were queued at the previous close, against
+today's adjusted bar. Mark the book at today's adjusted close and record
+equity. Queue new orders from today's scores, sized with today's close and
+today's sigma. Share counts are `weight * equity / close`. The C++ fill
+sees the next session's bar only. Unfilled size is not carried as a
+resting order. The next score recomputes the target from whatever position
+actually printed. Three algorithms run as three separate books on the same
+targets. They do not share a participation cap.
+
+**Alternatives.**
+
+- Trade at the close of day `t` with the close price, and assume no impact.
+  Common in papers. It also assumes you can trade the price your signal
+  just used, in size, which is the assumption this simulator exists to
+  drop.
+- Size the shares off the next open. That uses a price the close-of-day
+  decision did not know, and it makes the share count depend on the fill
+  bar. Sizing off the signal close keeps the order causal.
+- One shared book that tries each schedule in turn. Then the second
+  schedule is filling against a position the first schedule already
+  changed. The comparison would be an artifact.
+
+**Tradeoff.** A signal on the last day of the file never trades. A name
+with no bar on the fill date does not trade that day and keeps its last
+mark. Partial fills leave the book short of the target until the next
+score, which may be the next day and may not. Adjusted high and low are
+the raw bar times `adj_close / close`, not a vendor-adjusted range. Close is
+then set to `adj_close`. That assignment can leave the close one rounding
+error outside the scaled high or low, which the fill rejects, so high and
+low are expanded just enough to contain the open and the close. Volume
+is unadjusted relative to that price, so on a split day the participation
+cap and the economic price are in different units. Sigma is whatever
+`vol_21` said on the signal date. If that cell is missing, the fill gets
+zero and the impact term goes quiet.
+
+**Why this one.** The same-day test is the one I would put on a whiteboard.
+A bar opens at the old price and closes at twice that. The score is dated
+on that close. Equity does not move that day. The fill is the next
+session, and the raw price is the next session's price, not the open of
+the jump. A second test puts a large sigma on the fill date and a zero
+sigma on the signal date and requires the impact cost to be zero.
+
+### ADR-018 — Compare schedules, and do not call the Sharpe a strategy
+
+**Context.** Once three fills exist, someone will ask which one made more
+money. The answer has to be a small table with the accounting written
+down, and it has to be possible for the "winner" to be an accident of the
+path.
+
+**Decision.** The report has total return, Sharpe with a zero risk-free
+rate and a 252-day year, max drawdown as equity over the running peak
+minus one, average turnover, and total cost. Cost is computed from the
+fill cash and the raw notional, so a zero-cost flat round trip is flat and
+a positive half spread loses money. The markdown says the three rows are
+not a live result. The engine never reads a column named like a label.
+A test scans the source for `fwd_ret` and `label`.
+
+**Alternatives.** A single blended number, or a utility that picks the
+schedule with the best in-sample Sharpe. That would be another leak, and
+it would throw away the comparison the milestone asked for. I report all
+three and I do not select one.
+
+**Tradeoff.** Sharpe on a short synthetic window is noise. The report
+still prints it, because the definition is the thing being tested, not a
+claim that the number is large. Drawdown on a two-day book is not a risk
+system. Turnover uses raw notional, so a schedule that pays a wide spread
+does not look like it traded more just because the fill was expensive.
+Commission is inside cost and outside the fill price, matching the
+simulator.
+
+**Why this one.** The table answers "what changed when the schedule
+changed?" and refuses to answer "should I trade this?" The second question
+needs a portfolio that survived costs out of sample, and a sentence about
+survivorship, and I am not there yet. Paper trading is the next place that
+question gets asked, against a broker's paper endpoint rather than against
+this file.
+
 ## Known limitations
 
 - Survivorship bias, as above. No delistings, no historical index membership.
@@ -923,19 +1104,33 @@ It is not allowed to know what a feature is.
   add to each other's participation. There is no borrow fee.
 - A C++ change is compiled by reinstalling the package. The Python sources
   in an editable install update without that.
-- No portfolio backtest, broker, or dashboard exists yet.
+- The backtest is a research accounting of adjusted prices. It is not a
+  share-lot ledger, and it does not know a borrow fee, a locate, or a
+  margin rule. Shorts are a negative share count.
+- After the weight cap, the book can be net long or net short, and it can
+  hold less than the gross target. With a handful of names the default
+  10 percent cap cannot reach a gross of 1.
+- Adjusted high and low are the raw bar scaled by `adj_close / close`,
+  then expanded by at most a rounding error so they still contain the open
+  and the close. On a split day that price and the stored volume are not in
+  the same units, so the participation cap is only approximately economic.
+- Unfilled size is abandoned until the next score. It is not a resting
+  order. Orders generated on the last close of the file never fill.
+- The three schedules do not see each other's participation. A day when
+  all three would have been in the market together is not modeled.
+- Sharpe in the report annualizes daily strategy returns with a zero
+  risk-free rate. On a short window it is a description, not evidence.
+- No broker connection or dashboard exists yet.
 
 ## What I would build next on this stage
 
-A portfolio rule and a backtest that can trade only the next session's
-fill, comparing immediate, TWAP, and VWAP on the same forecasts. The
-same-day return stays out of the trade. The backtest has to pass a
-volatility from before the session, and it has to trade `prediction`
-rather than `label`.
+A paper-trading loop against Alpaca's paper endpoint only, and an
+attribution that splits a day's portfolio return across the signals that
+were on. The backtest's clock stays: a score cannot trade the session that
+produced it.
 
-Still owed from the data stage, and not blocking that backtest: a
-point-in-time membership table, a stored split factor so dollar volume is
-unambiguous, and sector-neutral z-scores.
+Still owed from the data stage: a point-in-time membership table, a stored
+split factor so dollar volume is unambiguous, and sector-neutral z-scores.
 
 ## Interview questions
 
@@ -946,8 +1141,8 @@ they do not get claimed yet.
 
 "Driftwood is a US equity research pipeline I'm building from daily prices
 through paper trading. What exists so far is the data, the features, a
-walk-forward return model, and a C++ fill. I have not run a portfolio
-backtest, so I do not have a Sharpe ratio to quote.
+walk-forward return model, a C++ fill, and a next-session backtest. I have
+not sent an order to a broker, paper or otherwise.
 
 The universe is 50 liquid large caps, a current snapshot, so it has
 survivorship bias and I say that before any result. I download daily bars
@@ -986,7 +1181,17 @@ order as a market-on-open, a TWAP, or a VWAP against a U-shaped volume
 guess. A bin can take only a fraction of its volume. Buys pay a half
 spread and a square-root impact. Python calls that module and does not
 keep a second copy of the formula. A round trip loses the spread, and
-that is a test."
+that is a test.
+
+The backtest is where those pieces meet. A score on today's close becomes
+a dollar-neutral book, capped per name, sized with today's close. The fill
+is tomorrow's bar. I do not get paid the return that just happened. The
+report runs immediate, TWAP, and VWAP on the same targets and shows
+return, a zero-risk-free Sharpe, drawdown, turnover, and cost. I would
+not read you the Sharpe off a short window and call it a strategy. The
+test I would point at is the jump: the bar opens at the old price and
+closes at twice that, the score is on that close, and the equity does
+not move until the next session."
 
 ### Why DuckDB instead of Parquet or Postgres?
 
@@ -1012,12 +1217,11 @@ split, and that is the test."
 
 ### Does this backtest have survivorship bias?
 
-"The panel the model trains on does, and I have not built a portfolio
-backtest yet. The universe is 50 names that are large and liquid now.
-Anything that was delisted or fell out of the large-cap set over the last
-ten years is absent. The information coefficient is a ranking score on this
-list, not a tradable historical S&P 500. The fix is a membership table with
-as-of dates, and I have not built that."
+"Yes. The backtest does not remove it. The universe is 50 names that are
+large and liquid now. Anything that was delisted or fell out of the
+large-cap set over the last ten years is absent. The Sharpe in the report
+is a ranking strategy on this list, not a tradable historical S&P 500.
+The fix is a membership table with as-of dates, and I have not built that."
 
 ### How do you test a downloader without hitting the network?
 
@@ -1146,6 +1350,44 @@ share and it is in the cash, not baked into the price, so I can see the
 two costs separately. The impact coefficient defaults to zero. I have not
 calibrated it, and I do not want a named number I did not estimate. Sigma
 is an argument. The simulator has no calendar, so it cannot stop me from
-passing a future volatility. The backtest will have to pass yesterday's.
-A round trip with a positive spread loses money. With the costs zeroed,
-the same round trip is flat. Both of those are tests."
+passing a future volatility. The backtest passes the volatility from the
+signal date. A test puts a large sigma on the fill date and requires the
+impact to stay zero. A round trip with a positive spread loses money.
+With the costs zeroed, the same round trip is flat. Both of those are
+tests."
+
+### Why doesn't the backtest trade on the day of the signal?
+
+"The signal uses the close. The open of that same day is already in the
+past by then. If I fill at that open, I am buying a price I did not know
+I wanted until after it printed, and I collect the move into the close
+for free. The loop fills yesterday's orders first, marks today's close
+second, and only then queues today's score for tomorrow. Share counts use
+today's close, not tomorrow's open. The test I would draw is a bar that
+opens at 100 and closes at 200, with the score dated on that close. Equity
+stays put. The fill is the next session, at the next session's price."
+
+### What do you mean by dollar-neutral, and what does the cap do to it?
+
+"I subtract the day's average score, so names above the average are long
+and names below it are short, in proportion. Before the cap, the dollars
+long and the dollars short match, and the sum of absolute weights is the
+gross I asked for. Then I clip each name once, and I hand any leftover
+gross to names that still have room, once, on the side they already had.
+I do not iterate. If the cap binds, the book can finish under-invested
+and it can pick up a net. I would rather show that than run a second pass
+that breaks the cap to make the gross look tidy. With two names and a
+10 percent cap you cannot get to a gross of one. That is arithmetic, and
+the toy examples raise the cap."
+
+### Why compare three schedules instead of picking the best Sharpe?
+
+"They are the same targets. The only thing that changes is when the shares
+cross the spread and which point on the invented path they pay. Picking
+the schedule with the highest Sharpe on this file would be fitting a
+trading rule to the same window I am reporting. The table shows return,
+Sharpe with a zero risk-free rate, drawdown, turnover, and cost, and the
+note says it is not a live result. A flat book with zero costs ends flat
+for all three. A positive spread loses money. A wide bar makes immediate
+and TWAP pay different prices. Those are the tests. The Sharpe on a short
+window is a description of that window."
