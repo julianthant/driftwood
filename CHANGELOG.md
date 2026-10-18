@@ -13,3 +13,4 @@ the milestone that introduced them.
 - Daily bar ingestion from yfinance into a local DuckDB file, with validation and upserts.
 - A fixed research universe of 50 liquid US stocks, plus a deterministic synthetic book for offline use.
 - An exploratory notebook, a `driftwood ingest` command, and design notes for the data stage.
+- Continuous integration that lints and runs the test suite on Linux, Windows, and macOS.
